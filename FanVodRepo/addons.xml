@@ -7,8 +7,8 @@
            provider-name="gpt">
         <requires>
             <import addon="xbmc.python" version="3.0.0"/>
-            <!-- Require the Fan Vod PL-specific PTW module so Kodi will pull it in automatically -->
-            <import addon="script.module.ptw.fanvodpl" version="2025.08.17"/>
+            <!-- Require the PTW module so Kodi will pull it in automatically -->
+            <import addon="script.module.ptw" version="2025.08.17"/>
             <import addon="script.module.requests"/>
             <import addon="script.module.metahandler" version="5.0.0"/>
             <import addon="script.module.beautifulsoup4"/>
@@ -57,10 +57,8 @@
         </extension>
     </addon>
 
-    <!-- Removed original PTW helper module to avoid conflicts with the official FanFilm version -->
-
-    <!-- PTW helper module customized for Fan Vod PL -->
-    <addon id="script.module.ptw.fanvodpl" name="PTW Module (FanVod PL)" version="2025.08.17" provider-name="PTW(gpt)">
+    <!-- PTW helper module -->
+    <addon id="script.module.ptw" name="PTW Module" version="2025.08.17" provider-name="PTW(gpt)">
         <requires>
             <import addon="xbmc.python" version="3.0.0"/>
             <import addon="script.module.beautifulsoup4"/>
@@ -77,7 +75,7 @@
         <extension point="xbmc.python.module" library="lib"/>
         <extension point="xbmc.addon.metadata">
             <platform>all</platform>
-            <summary lang="en">PTW for Fan Vod PL</summary>
+            <summary lang="en">PTW</summary>
         </extension>
     </addon>
 
