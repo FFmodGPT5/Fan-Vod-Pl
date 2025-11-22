@@ -166,7 +166,7 @@
             <platform>all</platform>
         </extension>
     </addon>
-    <addon id="script.module.ptwfanvod" name="PTW Module" version="2025.08.17" provider-name="PTW(gpt)">
+    <addon id="script.module.ptwfanvod" name="PTW Module" version="2025.11.22.1" provider-name="PTW(gpt)">
         <requires>
             <import addon="xbmc.python" version="3.0.0"/>
             <import addon="script.module.beautifulsoup4"/>
