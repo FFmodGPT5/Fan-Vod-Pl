@@ -1,59 +1,43 @@
 <?xml version="1.0" ?>
 <addons>
-    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<addon id="plugin.video.fanvodpl"
-       name="Fan Vod PL"
-       version="1.0.2"
-       provider-name="gpt">
-    <requires>
-        <import addon="xbmc.python" version="3.0.0"/>
-        <!-- Require the PTW module so Kodi will pull it in automatically -->
-        <import addon="script.module.ptwfanvod" version="2025.08.17"/>
-        <import addon="script.module.requests"/>
-        <import addon="script.module.metahandler" version="5.0.0"/>
-        <import addon="script.module.beautifulsoup4"/>
-        <import addon="script.module.future"/>
-        <import addon="plugin.video.youtube" optional="true"/>
-        <import addon="script.module.resolveurl"/>
-        <import addon="script.module.six"/>
-        <import addon="script.module.kodi-six"/>
-        <import addon="script.module.kover" version="0.0.6"/>
-        <!-- The original FanVodPL fork referenced two internal FanVodPL modules. They are not required
-             for core functionality in this fork and are not provided in this repository, so mark
-             both as optional to avoid missing dependency errors in Kodi. -->
-    </requires>
-
-    <!-- Register the main plugin entry point -->
-    <extension point="xbmc.python.pluginsource" library="default.py">
-        <provides>video</provides>
-    </extension>
-
-    <!-- Start background service on Kodi startup -->
-    <extension point="xbmc.service" library="service.py" start="startup"/>
-
-    <!-- Add context menu item for searching within the TV guide -->
-    <extension point="kodi.context.item">
-      <menu id="kodi.core.main">
-        <item library="epg.py">
-          <label lang="pl">Szukaj w Fan Vod PL</label>
-          <visible>Window.IsVisible(tvguide)|Window.IsVisible(tvsearch)|Window.IsVisible(tvchannels)</visible>
-        </item>
-      </menu>
-    </extension>
-
-    <!-- Metadata describing the add-on -->
-    <extension point="xbmc.addon.metadata">
-        <reuselanguageinvoker>true</reuselanguageinvoker>
-        <summary lang="pl">Fan Vod PL</summary>
-        <description lang="pl">Plugin z filmami i serialami (fork FanVodPL).</description>
-        <platform>all</platform>
-        <assets>
-            <icon>icon.png</icon>
-            <fanart>fanart.jpg</fanart>
-            <thumb>resources/media/icon-about.png</thumb>
-        </assets>
-    </extension>
-</addon>
+    <addon id="plugin.video.fanvodpl" name="Fan Vod PL" version="1.0.1" provider-name="gpt">
+        <requires>
+            <import addon="xbmc.python" version="3.0.0"/>
+            <import addon="script.module.ptwfanvod" version="2025.08.17"/>
+            <import addon="script.module.requests"/>
+            <import addon="script.module.metahandler" version="5.0.0"/>
+            <import addon="script.module.beautifulsoup4"/>
+            <import addon="script.module.future"/>
+            <import addon="plugin.video.youtube" optional="true"/>
+            <import addon="script.module.resolveurl"/>
+            <import addon="script.module.six"/>
+            <import addon="script.module.kodi-six"/>
+            <import addon="script.module.kover" version="0.0.6"/>
+        </requires>
+        <extension point="xbmc.python.pluginsource" library="default.py">
+            <provides>video</provides>
+        </extension>
+        <extension point="xbmc.service" library="service.py" start="startup"/>
+        <extension point="kodi.context.item">
+            <menu id="kodi.core.main">
+                <item library="epg.py">
+                    <label lang="pl">Szukaj w Fan Vod PL</label>
+                    <visible>Window.IsVisible(tvguide)|Window.IsVisible(tvsearch)|Window.IsVisible(tvchannels)</visible>
+                </item>
+            </menu>
+        </extension>
+        <extension point="xbmc.addon.metadata">
+            <reuselanguageinvoker>true</reuselanguageinvoker>
+            <summary lang="pl">Fan Vod PL</summary>
+            <description lang="pl">Plugin z filmami i serialami (fork FanVodPL).</description>
+            <platform>all</platform>
+            <assets>
+                <icon>icon.png</icon>
+                <fanart>fanart.jpg</fanart>
+                <thumb>resources/media/icon-about.png</thumb>
+            </assets>
+        </extension>
+    </addon>
     <addon id="script.module.js2py" name="js2py (stub)" version="0.7.0" provider-name="gpt">
         <requires>
             <import addon="xbmc.python" version="3.0.0"/>
@@ -98,7 +82,7 @@
             <platform>all</platform>
         </extension>
     </addon>
-    <addon id="repository.fanvodpl" name="Fan Vod PL Repo" version="1.0.0" provider-name="gpt">
+    <addon id="repository.fanvodpl" name="Fan Vod PL Repo" version="1.0.2" provider-name="gpt">
         <extension point="xbmc.addon.repository">
             <dir>
                 <info>https://ffmodgpt5.github.io/Fan-Vod-Pl/FanVodRepo/addons.xml</info>
