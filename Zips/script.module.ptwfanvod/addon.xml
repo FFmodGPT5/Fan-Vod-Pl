@@ -1,0 +1,18 @@
+<addon id="script.module.ptwfanvod" name="PTW Module" version="2026.0.31" provider-name="PTW(gpt)">
+    <requires>
+        <import addon="xbmc.python" version="3.0.0" />
+        <import addon="script.module.beautifulsoup4" />
+        <import addon="script.module.requests" />
+        <import addon="script.module.resolveurl" />
+        <import addon="script.module.six" />
+        <import addon="script.module.kodi-six" />
+        <import addon="script.module.pyxbmct" />
+        <import addon="script.module.future" />
+        <import addon="plugin.video.youtube" optional="true" />
+    </requires>
+    <extension point="xbmc.python.module" library="lib" />
+    <extension point="xbmc.addon.metadata">
+        <platform>all</platform>
+        <summary lang="en">PTW</summary>
+    </extension>
+</addon>
