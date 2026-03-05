@@ -4,7 +4,7 @@
     <requires>
         <import addon="xbmc.python" version="3.0.0" />
         
-        <import addon="script.module.ptwfanvod" version="2026.0.32" />
+        <import addon="script.module.ptwfanvod" version="2026.0.34" />
         <import addon="script.module.requests" />
         <import addon="script.module.metahandler" version="5.0.2" />
         <import addon="script.module.beautifulsoup4" />
@@ -75,7 +75,7 @@
     </extension>
 </addon>
 
-<addon id="script.module.ptwfanvod" name="PTW Module" version="2026.0.33" provider-name="PTW(gpt)">
+<addon id="script.module.ptwfanvod" name="PTW Module" version="2026.0.34" provider-name="PTW(gpt)">
     <requires>
         <import addon="xbmc.python" version="3.0.0" />
         <import addon="script.module.beautifulsoup4" />

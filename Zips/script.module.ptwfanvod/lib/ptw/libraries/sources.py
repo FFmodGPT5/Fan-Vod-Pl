@@ -1118,6 +1118,75 @@ class sources:
                 import xbmc
             except Exception:
                 return ("__CANCEL__", None)
+            # --- GOLD: tylko OSTATNIO ODTWARZANY link (nie wszystkie "TWOJ PLIK") ---
+            try:
+                import os as _ff_os
+                import hashlib as _ff_hashlib
+            except Exception:
+                _ff_os = None
+                _ff_hashlib = None
+
+            def _ff_last_choice_file():
+                try:
+                    control.makeFile(control.dataPath)
+                except Exception:
+                    pass
+                try:
+                    return (_ff_os.path.join(control.dataPath, "ff_last_choice.json") if _ff_os else "")
+                except Exception:
+                    return ""
+
+            def _ff_sig(_it):
+                try:
+                    base = str(_it.get("url") or _it.get("on_account_link") or _it.get("label") or repr(_it))
+                except Exception:
+                    base = repr(_it)
+                try:
+                    if _ff_hashlib:
+                        return _ff_hashlib.md5(base.encode("utf-8", "ignore")).hexdigest()
+                except Exception:
+                    pass
+                return base
+
+            def _ff_ctx_key(_title, _host_key):
+                return ("%s|%s" % (str(_title or "").strip().lower(), str(_host_key or "").strip().lower()))
+
+            def _ff_load_last_choice():
+                try:
+                    fp = _ff_last_choice_file()
+                    if fp and _ff_os and _ff_os.path.exists(fp):
+                        with open(fp, "r", encoding="utf-8") as f:
+                            d = json.load(f)
+                            return d if isinstance(d, dict) else {}
+                except Exception:
+                    pass
+                return {}
+
+            def _ff_save_last_choice(d):
+                try:
+                    fp = _ff_last_choice_file()
+                    if not fp:
+                        return
+                    if isinstance(d, dict) and len(d) > 200:
+                        try:
+                            items_sorted = sorted(d.items(), key=lambda kv: (kv[1] or {}).get("ts", 0))
+                            for k, _ in items_sorted[: max(0, len(d) - 200)]:
+                                d.pop(k, None)
+                        except Exception:
+                            pass
+                    with open(fp, "w", encoding="utf-8") as f:
+                        json.dump(d, f, ensure_ascii=False)
+                except Exception:
+                    pass
+
+            def _ff_mark_gold(lbl):
+                try:
+                    return "[COLOR gold]%s[/COLOR]" % lbl
+                except Exception:
+                    return lbl
+
+            _ff_last_map = _ff_load_last_choice()
+
 
             # 0) Brak źródeł – nic nie robimy
             items_all = items or []
@@ -1545,6 +1614,14 @@ class sources:
                     options_best = []
                     payloads_best = []
                     ai_flag = False
+                    # GOLD tylko dla ostatnio użytego pliku (per tytuł + host)
+                    try:
+                        _ff_ctx = _ff_ctx_key(title, chosen_key)
+                        _ff_last_sig = (_ff_last_map.get(_ff_ctx) or {}).get("sig")
+                    except Exception:
+                        _ff_ctx = None
+                        _ff_last_sig = None
+
 
                     def _add_option_if_ok(_it, _prefix):
                         nonlocal ai_flag
@@ -1595,6 +1672,13 @@ class sources:
                             label = "%s | %s | %s [AI LEKTOR] | %s | [%s]" % (_prefix, q_str, size_str, host_str, part_tag)
                         else:
                             label = "%s | %s | %s | %s | [%s]" % (_prefix, q_str, size_str, host_str, part_tag)
+                        try:
+                            _on_srv = bool(_it.get("on_account") or _it.get("on_account_link") or _it.get("on_account_expires"))
+                            if _on_srv or (_ff_last_sig and _ff_sig(_it) == _ff_last_sig):
+                                label = _ff_mark_gold(label)
+                        except Exception:
+                            pass
+
                         options_best.append(label)
                         payloads_best.append(_it)
 
@@ -1891,6 +1975,19 @@ class sources:
                 # True -> OGLĄDAJ ONLINE
                 if res:
                     chosen_label = "%s — %s, %s" % ("PREMIUM", q_str, tag_str)
+                    # zapamiętaj ostatnio użyty plik (dla złotego podświetlenia tylko 1 pozycji)
+                    try:
+                        _hk = ""
+                        try:
+                            _hk = chosen_key
+                        except Exception:
+                            _hk = best.get("provider") or best.get("source") or ""
+                        _k = _ff_ctx_key(title, _hk)
+                        _ff_last_map[_k] = {"sig": _ff_sig(best), "ts": time.time()}
+                        _ff_save_last_choice(_ff_last_map)
+                    except Exception:
+                        pass
+
                     return (chosen_label, [best])
 
                 # False -> POBIERZ PLIK NA DYSK
@@ -1944,6 +2041,19 @@ class sources:
 
                 if res:
                     chosen_label = "%s — %s, %s" % ("DARMOWE", q_str, tag_str)
+                    # zapamiętaj ostatnio użyty plik (dla złotego podświetlenia tylko 1 pozycji)
+                    try:
+                        _hk = ""
+                        try:
+                            _hk = chosen_key
+                        except Exception:
+                            _hk = best.get("provider") or best.get("source") or ""
+                        _k = _ff_ctx_key(title, _hk)
+                        _ff_last_map[_k] = {"sig": _ff_sig(best), "ts": time.time()}
+                        _ff_save_last_choice(_ff_last_map)
+                    except Exception:
+                        pass
+
                     return (chosen_label, [best])
 
                 return ("__CANCEL__", None)
