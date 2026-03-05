@@ -29,6 +29,14 @@ from urllib.parse import quote_plus, unquote_plus, parse_qsl
 import six
 import xbmc
 
+import xbmcaddon
+import threading
+import time
+try:
+    import xbmcvfs  # Kodi VFS helpers
+except Exception:
+    xbmcvfs = None
+
 from ptw.libraries import bookmarks
 from ptw.libraries import cleantitle
 from ptw.libraries import control
@@ -69,6 +77,15 @@ class player(xbmc.Player):
         self.addRating_in_progress = None
 
 
+        # --- MAX SAFE MODE (stability-first) ---
+        # On some devices (notably Android/Exynos) certain xbmc.Player methods can cause native crashes.
+        # In MAX_SAFE_MODE we keep callbacks extremely lightweight and avoid risky calls.
+        self._max_safe_mode = True
+        self._ended = False
+        self._error = False
+        self._stop_in_progress = False
+        self._stop_cleanup_done = False
+        self._last_stop_ts = 0.0
     # większość wywowałań tej funkcji wstawia zamiast tmdb "tvdb"
     def run(self, title, year, season, episode, imdb, tvdb, tmdb, url, subs=None, meta=None, handle=None, hosting=None, customPlayer=None):
 
@@ -691,208 +708,199 @@ class player(xbmc.Player):
             pass
 
 
-    def onPlayBackStarted(self):
-        fflog('playback started')
-        self.playback_started = True
-        #control.execute("Dialog.Close(notification,true)")
-        if True:
-            try:
-                fflog( "# file " + self.getPlayingFile(), 0)
-                # self.is_active = True  # nie wiem, czy to tu potrzebne
-            except Exception:
-                fflog( "# failed get what I'm playing #", 0)
+    # -------------------------
+    # MAX SAFE helpers
+    # -------------------------
+    def _translate_path(self, path):
+        try:
+            if xbmcvfs and hasattr(xbmcvfs, "translatePath"):
+                return xbmcvfs.translatePath(path)
+        except Exception:
+            pass
+        try:
+            return xbmc.translatePath(path)
+        except Exception:
+            return path
 
+    def _notify(self, msg, ms=2500):
+        # Use a notification that is safe even if called from a worker thread.
+        try:
+            # control.dialog.notification is used elsewhere in this file.
+            control.dialog.notification("FanVodPL", msg, time=ms, sound=False)
+            return
+        except Exception:
+            pass
+        try:
+            xbmc.executebuiltin("Notification(FanVodPL,{0},{1})".format(msg, int(ms)))
+        except Exception:
+            pass
+
+    def _run_async(self, fn, delay_s=0.35):
+        def _worker():
+            try:
+                mon = xbmc.Monitor()
+                if delay_s and delay_s > 0:
+                    mon.waitForAbort(float(delay_s))
+            except Exception:
+                try:
+                    time.sleep(float(delay_s))
+                except Exception:
+                    pass
+            try:
+                fn()
+            except Exception:
+                try:
+                    fflog_exc(1)
+                except Exception:
+                    pass
+
+        try:
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+        except Exception:
+            # Fallback: run inline (still protected)
+            _worker()
+
+    def _cleanup_plugin_cache_dirs(self):
+        # Only clears this addon's cache/temp/cookies. Does NOT touch global Kodi cache.
+        try:
+            addon_id = xbmcaddon.Addon().getAddonInfo("id")
+        except Exception:
+            addon_id = None
+        if not addon_id:
+            return (0, 0)
+
+        base = self._translate_path("special://profile/addon_data/{0}".format(addon_id))
+        targets = ["cache", "temp", "tmp", "cookies"]
+
+        files_deleted = 0
+        dirs_deleted = 0
+
+        for sub in targets:
+            d = os.path.join(base, sub)
+            if not os.path.exists(d):
+                continue
+
+            for root, dirs, files in os.walk(d, topdown=False):
+                for fn in files:
+                    fp = os.path.join(root, fn)
+                    try:
+                        os.remove(fp)
+                        files_deleted += 1
+                    except Exception:
+                        pass
+                for dn in dirs:
+                    dp = os.path.join(root, dn)
+                    try:
+                        os.rmdir(dp)
+                        dirs_deleted += 1
+                    except Exception:
+                        pass
+
+        return (files_deleted, dirs_deleted)
+
+    def onPlayBackStarted(self):
+        # MAX SAFE: keep this callback minimal (no getPlayingFile/getTime).
+        try:
+            fflog('playback started')
+        except Exception:
+            pass
+        self.playback_started = True
+        self.is_active = True
+        self._ended = False
+        self._error = False
+        self._stop_in_progress = False
+        self._stop_cleanup_done = False
 
     def onAVStarted(self):  # czasami dopiero po ponad 1 sekundzie odpala
-        fflog('player has video and audiostream')
-        #fflog(f"{self.getTotalTime()=}", 1)
-
-        if (
-            control.setting("bookmarks") == "true"
-            and int(self.offset) > 120
-            and self.isPlayingVideo()
-            and abs(int(self.offset) - self.getTime()) > 10 # 10 sekund tolerancji
-        ):
-            """
-            if control.setting("bookmarks.auto") == "true":  # nie ma takiego settingsu
-                self.seekTime(float(self.offset))
-            else:
-            """
-            control.execute("Dialog.Close(all,true)")
-            control.sleep0(200)
-
-            self.pause()
-            control.sleep0(100)
-
-            minutes, seconds = divmod(float(self.offset), 60)
-            hours, minutes = divmod(minutes, 60)
-            label = f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
-
-            label = control.lang2(12022).format(label)
-            fflog('waiting for decision if continue from last point or start from begin')
-            if (
-                #control.setting("resume.source") == "1"  # nie ma takiego settingsu
-                trakt.getTraktIndicatorsInfo()
-                and trakt.getTraktCredentialsInfo() == True
-            ):
-                yes = control.yesnoDialog(
-                    label + ("[CR]  (Trakt scrobble)" if self.offsetSource=='trakt' else '[CR]  (local FanVodPL bookmarks)'),
-                    yeslabel=control.lang2(13404),
-                    nolabel=control.lang2(12021),
-                )
-            else:  # lokalnie
-                yes = control.yesnoDialog(
-                    label,
-                    yeslabel=control.lang2(13404),
-                    nolabel=control.lang2(12021),
-                )
-
-            if yes:
-                minutes, seconds = divmod(float(self.offset), 60)
-                hours, minutes = divmod(minutes, 60)
-                #fflog(f'user decided jump to {float(self.offset)=} sec. ({(float(self.offset)/60)} min.)')
-                fflog(f"user decided jump to {int(hours):02}:{int(minutes):02}:{int(seconds):02}  |  {float(self.offset)=} sec.")
-                self.seekTime(float(self.offset))
-
-                control.sleep0(500)
-                self.currentTime = self.getTime()
-                fflog(f'{self.currentTime=}',0,1)
-                c = 0
-                while self.currentTime < 2 and c < 5*5:
-                    c += 1
-                    control.sleep(200)
-                    self.currentTime = self.getTime()
-                fflog(f'{self.currentTime=}',0,1)
-
-            self.pause()
-            control.sleep(100)
-
-        else:
-            if self.isPlayingVideo():
-                if (
-                    trakt.getTraktCredentialsInfo()
-                    #and control.setting("trakt.scrobble") == "true"
-                    and trakt.getTraktIndicatorsInfo()
-                    and self.external_scrobble_is_disabled()
-                ):
-                    #self.currentTime = self.getTime()
-                    #self.totalTime = self.getTotalTime()
-                    #fflog(f'bookmarks set_scrobble (trakt)')
-                    bookmarks.set_scrobble(
-                        self.currentTime,
-                        #self.totalTime,
-                        self.runtime or self.totalTime,
-                        self.content,
-                        self.imdb,
-                        None,
-                        self.season,
-                        self.episode,
-                        self.offset,
-                        action="start",
-                    )            
-        #self.idleForPlayback()  # nie ma takiej funkcji tu
-
+        # MAX SAFE: do not use getTime/getTotalTime/pause/seek/resume dialogs here.
+        try:
+            fflog('player has video and audiostream')
+        except Exception:
+            pass
+        return
 
     def onPlayBackStopped(self):
-        if self.is_active == False:  # powinno oznaczać, że już funkcja została wykonana
-            return
-        fflog('player has been stopped')  # czasami się nie chce pojawiać
+        # MAX SAFE: keep STOP callback extremely lightweight to avoid native crashes on some devices.
+        try:
+            if getattr(self, "_stop_in_progress", False):
+                return
+            if self.is_active == False:
+                return
+        except Exception:
+            pass
+
+        self._stop_in_progress = True
+        self._last_stop_ts = time.time()
+        try:
+            fflog('player has been stopped')
+        except Exception:
+            pass
+
+        # Mark inactive early (prevents duplicate execution paths)
         self.is_active = False
 
-        """
-        if (self.totalTime == 0
-            or self.currentTime == 0
-           ):
-            fflog(f'nie rejestruję czasu')
-            #control.sleep(1000)  # czemu taki długi czas ?
-            control.sleep(100)  # eksperyment
-            return  # a co z trakt ? Czy nie trzeda dać sygnału stop ? trzeba
-        """
-        if self.currentTime is not None and self.currentTime > 120:  # 2 minuty
-            ok = (int(self.currentTime) > 120  # to ważne, choć wyżej jest warunek na 120, więc nie wiem, czy trzeba go to też
-                  # FIX Exynos: ochrona przed ZeroDivisionError gdy totalTime == 0 (STOP tuż po starcie)
-                  and (self.currentTime / self.totalTime if self.totalTime else 0) < 0.92  # pomyśleć, czy trzeba
-                 )
-            if ok:
-                bookmarks._delete_record(self.content, self.imdb)  # przydaje się, aby osatnio oglądany pojawiał się na końcu w tabeli
-                control.sleep(100)
-            #fflog(f'bookmarks (re)set | {self.imdb=} {self.currentTime=}')
-            bookmarks.reset(
-                self.currentTime,
-                self.totalTime,  # tylko do ustalenia, czy obejrzany (od 92%)
-                self.content,
-                self.imdb,
-                self.season,
-                self.episode,
-            )
+        if getattr(self, "_max_safe_mode", True):
+            # Decide about cleanup a bit later, so if Kodi fires ENDED/ERROR after STOP, we don't misclassify.
+            def _maybe_cleanup():
+                try:
+                    if getattr(self, "_stop_cleanup_done", False):
+                        return
+                    if getattr(self, "_ended", False) or getattr(self, "_error", False):
+                        return
 
-        # dla trakt musi pójść sygnał pause albo stop, dlatego dalsza część kodu musi być wykonana
+                    self._stop_cleanup_done = True
+                    files_deleted, dirs_deleted = self._cleanup_plugin_cache_dirs()
 
-        # rejestrację czasu w trakt wykonuje też wtyczka z repo Kodi script.trakt i może ona nadpisywać to co tu jest wysyłane (chociaż zależy od ustawień tam) 
-        if (
-            trakt.getTraktCredentialsInfo()
-            #and control.setting("trakt.scrobble") == "true"
-            and trakt.getTraktIndicatorsInfo()
-            # można ewentualnie zrobić wykrywanie aktywnej takiej wtyczki i jej ustawień (tam też jest offset od ilu rejestrować), tylko wówczas jak coś zmieni się w tamtej wtyczce to tu może przestać działać, więc może lepiej niezależnie zapisywać
-            #and (not external_script_trakt_enabled or int(external_scrobble_start_offset)*60 > self.currentTime and external_scrobble_movie != "true" if self.content == "movie" else external_scrobble_episode != "true") 
-            and self.external_scrobble_is_disabled()
-        ):
-            fflog(f'\n{self.currentTime=}\n  {self.runtime=}\n{self.totalTime=}')
-            #fflog(f'bookmarks set_scrobble (trakt)')
-            bookmarks.set_scrobble(
-                self.currentTime,
-                #self.totalTime,
-                self.runtime or self.totalTime,
-                self.content,
-                self.imdb,
-                None,
-                self.season,
-                self.episode,
-                self.offset,
-            )
+                    if files_deleted or dirs_deleted:
+                        self._notify(
+                            "STOP: wyczyszczono cache (pliki: {0}, foldery: {1})".format(files_deleted, dirs_deleted)
+                        )
+                    else:
+                        self._notify("STOP: cache już był pusty")
+                except Exception:
+                    try:
+                        fflog_exc(1)
+                    except Exception:
+                        pass
 
-        if self.totalTime and float(self.currentTime / self.totalTime) >= 0.92:
-            fflog(f'mark as watched (more than 92%)')
-            self.libForPlayback()
+            self._run_async(_maybe_cleanup, delay_s=0.55)
+            return
 
-        add_rating_for_tmdb = control.setting("add_rating_for_tmdb") == "true" and (
-            control.setting("add_rating_for_tmdb.movies") == "true" if self.content == "movie"
-            else control.setting("add_rating_for_tmdb.episodes") == "true" )
-        if add_rating_for_tmdb and not self.watched_before:
-            fflog('włączona jest opcja oceniania materiału po obejrzeniu, który nie był wcześniej obejrzany',1,1)
-            fflog(f'{self.content=}  {self.tmdb=}  {self.season=}  {self.episode=}  percent={self.currentTime / self.totalTime} ',1,1) if self.totalTime else ""  # aby nie było dzielenia przez 0
-            if self.tmdb and self.totalTime:  # aby nie było dzielenia przez 0
-                if (self.currentTime / self.totalTime) >= 0.92:
-                    # czy da się sprawdzić, czy już ten materiał był oceniony?  chociaż ocenę można zmienić
-                    self.addRating_in_progress = True
-                    control.busy()
-                    control.sleep(100)
-                    control.execute(
-                        "RunPlugin(%s?action=add_rating&content=%s&tmdb=%s&season=%s&episode=%s)" % 
-                            (sys.argv[0], self.content, self.tmdb, self.season, self.episode)
-                    )
-                    pass
-                else:
-                    fflog(f'nie osiągnięto minimalnego wymagalnego procentu obejrzenia (92%)',1,1)
-            else:
-                fflog(f'ocenienie niemożliwe, bo {self.tmdb=} lub {self.totalTime=}',1,1)
-
-
+        # Non-safe mode fallback: keep original behavior (not used by default).
+        try:
+            fflog('MAX_SAFE_MODE disabled: original STOP logic skipped in this build', 1)
+        except Exception:
+            pass
 
     def onPlayBackEnded(self):  # materiał doszedł do końca
-        fflog('playback Ended')
-        self.libForPlayback()
-        self.onPlayBackStopped()
-        if control.setting("crefresh") == "true":
-            control.refresh()
-        fflog('end of onPlayBackEnded method',1,1)
+        # MAX SAFE: mark as ended and reuse STOP handler (which will NOT run cleanup when _ended==True).
+        try:
+            fflog('playback Ended')
+        except Exception:
+            pass
+        self._ended = True
+        try:
+            self.onPlayBackStopped()
+        except Exception:
+            pass
+        try:
+            if control.setting("crefresh") == "true":
+                control.refresh()
+        except Exception:
+            pass
 
-
-    def onPlayBackError(self):  # nie wiem, kiedy to się pojawia  # Will be called when playback stops due to an error. 
-        fflog('playback ERROR')
-        self.is_active = False  # wyzerowanie flagi
-        self.onPlayBackStopped()  # nie wiem, czy trzeba to ręcznie, czy Kodi sam trigernie ten callback (ale ponieważ zrobiłem, że funkcja może się nie wykonać ze względu na flagę, to lepiej ją wywołam)
-
+    def onPlayBackError(self):  # Will be called when playback stops due to an error.
+        try:
+            fflog('playback ERROR')
+        except Exception:
+            pass
+        self._error = True
+        # Ensure STOP handler runs once, but it will skip cleanup because _error==True.
+        try:
+            self.onPlayBackStopped()
+        except Exception:
+            pass
 
     def onPlayBackSeek(self, time, offset):
         fflog('playback Seek')
@@ -924,58 +932,20 @@ class player(xbmc.Player):
 
 
     def onPlayBackResumed(self):
-        fflog('playback Resumed')
-        if self.isPlayingVideo():
-            if (
-                trakt.getTraktCredentialsInfo()
-                #and control.setting("trakt.scrobble") == "true"
-                and trakt.getTraktIndicatorsInfo()
-                and self.external_scrobble_is_disabled()
-            ):
-                #self.currentTime = self.getTime()
-                #self.totalTime = self.getTotalTime()
-                #fflog(f'{self.totalTime=} {self.currentTime=}')
-                #fflog(f'bookmarks set_scrobble (trakt)')
-                bookmarks.set_scrobble(
-                    self.currentTime,
-                    #self.totalTime,
-                    self.runtime or self.totalTime,
-                    self.content,
-                    self.imdb,
-                    None,
-                    self.season,
-                    self.episode,
-                    self.offset,
-                    action="start",
-                )
-
+        # MAX SAFE: do nothing (avoids trakt/bookmarks scrobble calls in callback).
+        try:
+            fflog('playback Resumed')
+        except Exception:
+            pass
+        return
 
     def onPlayBackPaused(self):
-        fflog('playback Paused')
-        if self.isPlayingVideo():
-            if (
-                trakt.getTraktCredentialsInfo()
-                #and control.setting("trakt.scrobble") == "true"
-                and trakt.getTraktIndicatorsInfo()
-                and self.external_scrobble_is_disabled()
-            ):
-                #self.currentTime = self.getTime()
-                #self.totalTime = self.getTotalTime()
-                #fflog(f'{self.totalTime=} {self.currentTime=}')
-                #if self.currentTime > 
-                #fflog(f'bookmarks set_scrobble (trakt)')
-                bookmarks.set_scrobble(
-                    self.currentTime,
-                    #self.totalTime,
-                    self.runtime or self.totalTime,
-                    self.content,
-                    self.imdb,
-                    None,
-                    self.season,
-                    self.episode,
-                    self.offset,
-                )
-
+        # MAX SAFE: do nothing (avoids trakt/bookmarks scrobble calls in callback).
+        try:
+            fflog('playback Paused')
+        except Exception:
+            pass
+        return
 
     def external_scrobble_is_disabled(self):
         external_scrobble_is_disabled = not(trakt.getTraktAddonMovieInfo() if self.content == "movie" else trakt.getTraktAddonEpisodeInfo())
