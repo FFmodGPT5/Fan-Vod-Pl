@@ -1,4 +1,4 @@
-<addon id="script.module.ptwfanvod" name="PTW Module" version="2026.0.39" provider-name="PTW(gpt)">
+<addon id="script.module.ptwfanvod" name="PTW Module" version="2026.0.37" provider-name="PTW(gpt)">
     <requires>
         <import addon="xbmc.python" version="3.0.0" />
         <import addon="script.module.beautifulsoup4" />
