@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <addons>
-<addon id="plugin.video.fanvodpl" name="Fan Vod PL" version="2.0.37" provider-name="gpt">
+<addon id="plugin.video.fanvodpl" name="Fan Vod PL" version="2.0.45" provider-name="gpt">
     <requires>
         <import addon="xbmc.python" version="3.0.0" />
         
-        <import addon="script.module.ptwfanvod" version="2026.0.40" />
+        <import addon="script.module.ptwfanvod" version="2026.0.45" />
         <import addon="script.module.requests" />
-        <import addon="script.module.metahandler" version="5.0.2" />
+        <import addon="script.module.metahandler" version="5.0.5" />
         <import addon="script.module.beautifulsoup4" />
         <import addon="script.module.future" />
         <import addon="plugin.video.youtube" optional="true" />
@@ -48,7 +48,7 @@
     </extension>
 </addon>
 
-<addon id="repository.fanvodpl" name="Fan Vod PL Repo" version="2.0.37" provider-name="gpt">
+<addon id="repository.fanvodpl" name="Fan Vod PL Repo" version="2.0.45" provider-name="gpt">
     <extension point="xbmc.addon.repository" name="Fan Vod PL Repo">
         
         <dir>
@@ -75,7 +75,7 @@
     </extension>
 </addon>
 
-<addon id="script.module.ptwfanvod" name="PTW Module" version="2026.0.40" provider-name="PTW(gpt)">
+<addon id="script.module.ptwfanvod" name="PTW Module" version="2026.0.45" provider-name="PTW(gpt)">
     <requires>
         <import addon="xbmc.python" version="3.0.0" />
         <import addon="script.module.beautifulsoup4" />
@@ -94,7 +94,7 @@
     </extension>
 </addon>
 
-<addon id="script.module.metahandler" name="metahandler" version="5.0.2" provider-name="Eldorado">
+<addon id="script.module.metahandler" name="metahandler" version="5.0.5" provider-name="Eldorado">
 	<requires>
 		<import addon="xbmc.python" version="3.0.0" />
 		<import addon="script.module.six" version="1.14.0+matrix.2" />
