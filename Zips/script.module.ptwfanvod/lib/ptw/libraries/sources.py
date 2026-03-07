@@ -345,7 +345,7 @@ def _ff_extract_release_year(year=None, premiered=None):
 def _ff_is_legacy_decades(release_year) -> bool:
     try:
         y = int(release_year)
-        return 1950 <= y <= 1999
+        return 1950 <= y <= 2005
     except Exception:
         return False
 
@@ -377,7 +377,7 @@ def _ff_mask_avi_for_legacy(text: str) -> str:
     return t
 
 
-# --- LEGACY FULL MASK (tytuły 1950-1999) ---
+# --- LEGACY FULL MASK (tytuły 1950-2005) ---
 # Stare filmy/seriale mają pliki tylko w starych formatach (DVDRip, XviD, AVI, TS itp.)
 # Zastępujemy je neutralnymi tokenami żeby nie były blokowane przez globalną blacklistę.
 _FF_LEGACY_MASK_PATTERNS = [
@@ -408,7 +408,7 @@ _FF_LEGACY_MASK_PATTERNS = [
 
 
 def _ff_mask_all_for_legacy(text: str) -> str:
-    """Maskuje WSZYSTKIE frazy jakościowe/formatowe dla tytułów z lat 1950-1999."""
+    """Maskuje WSZYSTKIE frazy jakościowe/formatowe dla tytułów z lat 1950-2005."""
     t = str(text or "")
     for pattern, replacement in _FF_LEGACY_MASK_PATTERNS:
         t = pattern.sub(replacement, t)
@@ -418,7 +418,7 @@ def _ff_mask_all_for_legacy(text: str) -> str:
 def _ff_prepare_text_for_blocking(text: str, allow_legacy_avi: bool = False) -> str:
     t = (text or "")
     if allow_legacy_avi:
-        # Pełna maska legacy (1950-1999) — wszystkie frazy jakościowe przepuszczone
+        # Pełna maska legacy (1950-2005) — wszystkie frazy jakościowe przepuszczone
         return _ff_mask_all_for_legacy(t).lower()
     return t.lower()
 
@@ -893,6 +893,8 @@ class sources:
         # CLASSIC SERIES BYPASS (1950–2015): jeśli to odcinek serialu z lat 1950–2015, nie stosuj limitów GB
         if getattr(self, '_ff_bypass_classic_series', False):
             return items
+        # LEGACY MOVIE BYPASS (1950–2005): stare filmy mają małe pliki — wyłącz tylko dolny limit MIN
+        _legacy_movie = getattr(self, '_ff_allow_legacy_avi', False)
         limits = self._get_limit_values()
         if not items or not isinstance(items, list):
             return items
@@ -927,7 +929,7 @@ class sources:
                 else:
                     mi, ma = None, None
 
-            if mi is not None and size < mi:
+            if mi is not None and size < mi and not _legacy_movie:
                 return False
             if ma is not None and size > ma:
                 return False
@@ -1118,89 +1120,20 @@ class sources:
                 import xbmc
             except Exception:
                 return ("__CANCEL__", None)
-            # --- GOLD: tylko OSTATNIO ODTWARZANY link (nie wszystkie "TWOJ PLIK") ---
-            try:
-                import os as _ff_os
-                import hashlib as _ff_hashlib
-            except Exception:
-                _ff_os = None
-                _ff_hashlib = None
-
-            def _ff_last_choice_file():
-                try:
-                    control.makeFile(control.dataPath)
-                except Exception:
-                    pass
-                try:
-                    return (_ff_os.path.join(control.dataPath, "ff_last_choice.json") if _ff_os else "")
-                except Exception:
-                    return ""
-
-            def _ff_sig(_it):
-                try:
-                    base = str(_it.get("url") or _it.get("on_account_link") or _it.get("label") or repr(_it))
-                except Exception:
-                    base = repr(_it)
-                try:
-                    if _ff_hashlib:
-                        return _ff_hashlib.md5(base.encode("utf-8", "ignore")).hexdigest()
-                except Exception:
-                    pass
-                return base
-
-            def _ff_ctx_key(_title, _host_key):
-                return ("%s|%s" % (str(_title or "").strip().lower(), str(_host_key or "").strip().lower()))
-
-            def _ff_load_last_choice():
-                try:
-                    fp = _ff_last_choice_file()
-                    if fp and _ff_os and _ff_os.path.exists(fp):
-                        with open(fp, "r", encoding="utf-8") as f:
-                            d = json.load(f)
-                            return d if isinstance(d, dict) else {}
-                except Exception:
-                    pass
-                return {}
-
-            def _ff_save_last_choice(d):
-                try:
-                    fp = _ff_last_choice_file()
-                    if not fp:
-                        return
-                    if isinstance(d, dict) and len(d) > 200:
-                        try:
-                            items_sorted = sorted(d.items(), key=lambda kv: (kv[1] or {}).get("ts", 0))
-                            for k, _ in items_sorted[: max(0, len(d) - 200)]:
-                                d.pop(k, None)
-                        except Exception:
-                            pass
-                    with open(fp, "w", encoding="utf-8") as f:
-                        json.dump(d, f, ensure_ascii=False)
-                except Exception:
-                    pass
-
-            def _ff_mark_gold(lbl):
-                try:
-                    return "[COLOR gold]%s[/COLOR]" % lbl
-                except Exception:
-                    return lbl
-
-            _ff_last_map = _ff_load_last_choice()
-
 
             # 0) Brak źródeł – nic nie robimy
             items_all = items or []
             if not items_all:
                 return ("__CANCEL__", None)
 
-            # --- SD policy: block SD globally, allow for legacy (<=1999) or classic series (<=2015) ---
+            # --- SD policy: block SD globally, allow for legacy (<=2005) or classic series (<=2015) ---
             def _legacy_sd_allowed() -> bool:
                 try:
                     y = getattr(self, "_ff_ctx_year", None)
                     y = int(y) if y not in (None, "", "None", "0") else None
                 except Exception:
                     y = None
-                if (y is not None) and (y <= 1999):
+                if (y is not None) and (y <= 2005):
                     return True
                 # CLASSIC SERIES BYPASS (1950-2015): dopuszczamy SD dla seriali z lat 1950-2015
                 return bool(getattr(self, "_ff_bypass_classic_series", False))
@@ -1591,6 +1524,9 @@ class sources:
                                         prov_name = "%s (Max %s)" % (prov_name, _max_q)
                                 except Exception:
                                     pass
+                                # --- on_account: złoty kolor jeśli jakikolwiek link hosta jest na koncie ---
+                                if any(_it.get("on_account") for _it in links):
+                                    prov_name = "[COLOR gold]%s[/COLOR]" % prov_name
                                 options_hosts.append(prov_name)
                                 payloads_hosts.append(key)
                             if options_hosts:
@@ -1614,14 +1550,6 @@ class sources:
                     options_best = []
                     payloads_best = []
                     ai_flag = False
-                    # GOLD tylko dla ostatnio użytego pliku (per tytuł + host)
-                    try:
-                        _ff_ctx = _ff_ctx_key(title, chosen_key)
-                        _ff_last_sig = (_ff_last_map.get(_ff_ctx) or {}).get("sig")
-                    except Exception:
-                        _ff_ctx = None
-                        _ff_last_sig = None
-
 
                     def _add_option_if_ok(_it, _prefix):
                         nonlocal ai_flag
@@ -1672,13 +1600,8 @@ class sources:
                             label = "%s | %s | %s [AI LEKTOR] | %s | [%s]" % (_prefix, q_str, size_str, host_str, part_tag)
                         else:
                             label = "%s | %s | %s | %s | [%s]" % (_prefix, q_str, size_str, host_str, part_tag)
-                        try:
-                            _on_srv = bool(_it.get("on_account") or _it.get("on_account_link") or _it.get("on_account_expires"))
-                            if _on_srv or (_ff_last_sig and _ff_sig(_it) == _ff_last_sig):
-                                label = _ff_mark_gold(label)
-                        except Exception:
-                            pass
-
+                        if _it.get("on_account"):
+                            label = "[COLOR gold]%s[/COLOR]" % label
                         options_best.append(label)
                         payloads_best.append(_it)
 
@@ -1724,6 +1647,16 @@ class sources:
                         subs_candidates = []
                     for it in subs_candidates:
                         _add_option_if_ok(it, "Napisy PL")
+
+                    # CLASSIC SERIES (1950-2015): dodaj też linki bez PL (oryginał, angielski itp.)
+                    try:
+                        if getattr(self, '_ff_bypass_classic_series', False):
+                            _already = set(id(x) for x in payloads_best)
+                            for it in all_items:
+                                if id(it) not in _already:
+                                    _add_option_if_ok(it, "Oryginał")
+                    except Exception:
+                        pass
 
                     if options_best:
                         if ai_flag:
@@ -1975,19 +1908,6 @@ class sources:
                 # True -> OGLĄDAJ ONLINE
                 if res:
                     chosen_label = "%s — %s, %s" % ("PREMIUM", q_str, tag_str)
-                    # zapamiętaj ostatnio użyty plik (dla złotego podświetlenia tylko 1 pozycji)
-                    try:
-                        _hk = ""
-                        try:
-                            _hk = chosen_key
-                        except Exception:
-                            _hk = best.get("provider") or best.get("source") or ""
-                        _k = _ff_ctx_key(title, _hk)
-                        _ff_last_map[_k] = {"sig": _ff_sig(best), "ts": time.time()}
-                        _ff_save_last_choice(_ff_last_map)
-                    except Exception:
-                        pass
-
                     return (chosen_label, [best])
 
                 # False -> POBIERZ PLIK NA DYSK
@@ -2041,19 +1961,6 @@ class sources:
 
                 if res:
                     chosen_label = "%s — %s, %s" % ("DARMOWE", q_str, tag_str)
-                    # zapamiętaj ostatnio użyty plik (dla złotego podświetlenia tylko 1 pozycji)
-                    try:
-                        _hk = ""
-                        try:
-                            _hk = chosen_key
-                        except Exception:
-                            _hk = best.get("provider") or best.get("source") or ""
-                        _k = _ff_ctx_key(title, _hk)
-                        _ff_last_map[_k] = {"sig": _ff_sig(best), "ts": time.time()}
-                        _ff_save_last_choice(_ff_last_map)
-                    except Exception:
-                        pass
-
                     return (chosen_label, [best])
 
                 return ("__CANCEL__", None)
@@ -4282,49 +4189,78 @@ class sources:
         if control.player.isPlayingVideo():
             control.player.pause()
 
-        if progressDialogBG is None:
-            progressDialog = (
-                control.progressDialog
-                if control.setting("progress.dialog") == "0"
-                else control.progressDialogBG
-            )
-        elif not progressDialogBG:
-            progressDialog = control.progressDialog
-        else:
-            progressDialog = control.progressDialogBG
-
-        yatse = control.setting("yatse") == "true"
-        if yatse:
-            progressDialog = control.progressDialogBG
-
-        if control.setting("progress.dialog.name_of_searching_item") == "true":
-            skinDir = control.skin  # po zmianie skórki nie zawsze chce mi odświeżyć - ale pomogła zmiana nazwy zmiennej, bo "skin" już jest używane w view.py i może przy korzystaniu z reuselanguageinvoker ma to znaczenie
-            # skinDir = xbmc.getSkinDir()  # może to będzie lepsze?
-            # skinName = control.addon(skin).getAddonInfo("name")
-            fflog(f'{skinDir=}',0,1)
-            # fflog(f'{skinName=}',1,1)
-
-            # progressDialog.create(control.addonInfo("name"), "")
-            """
-            tytul_okienka_progresu  = ""
-            tytul_okienka_progresu += "Wyszukiwanie źródeł"  # można to zakomentować np. przy domyślnej skórce
-            if skinDir.startswith("skin.estuary"):  # także dla modów na bazie tej skórki
-                tytul_okienka_progresu  = ""
+        # ---------------------------------------------------------------
+        # NOWY DIALOG WYSZUKIWANIA (SearchSourcesDialog)
+        # zastępuje standardowy progressDialog bardziej czytelnym oknem
+        # ---------------------------------------------------------------
+        try:
+            from ptw.libraries.search_dialog import create_search_dialog, _best_quality as _bq
+            _dlg_title = (localtvshowtitle or localtitle or title or '').strip()
+            _dlg_meta  = ''
+            if episode:
+                _dlg_meta += 'S%02dE%02d' % (int(season or 1), int(episode))
+            if year:
+                _dlg_meta += ('  |  ' if _dlg_meta else '') + str(year)
+            if duration:
+                try:
+                    _dur_sec = int(duration)
+                    # duration w Kodi może być w minutach LUB sekundach
+                    # jeśli > 300 zakładamy sekundy i przeliczamy
+                    _dur_min = _dur_sec // 60 if _dur_sec > 300 else _dur_sec
+                    _dlg_meta += ('  |  ' if _dlg_meta else '') + '%d min' % _dur_min
+                except Exception:
+                    pass
+            _dlg_rating = ''
+            try:
+                _r = control.window.getProperty('VideoPlayer.Rating') or ''
+                if _r: _dlg_rating = '%.1f/10' % float(_r)
+            except Exception:
                 pass
-            """
-            tytul_okienka_progresu  = ""
-            tytul_okienka_progresu += f"\n{localtvshowtitle or localtitle}"  # znacznik nowej linii może trochę źle wyglądać na domyślnej skórce
-            # tytul_okienka_progresu += f" ({year})"  # bo czasami nie mieści się w 1 linijce
-            tytul_okienka_progresu += "  S%02dE%02d" % (int(season or 1), int(episode)) if episode else ""
-            tytul_okienka_progresu  = tytul_okienka_progresu.replace(" ()", "").strip(" ")  # tylko spacje chcę czyścić
-            tytul_okienka_progresu  = tytul_okienka_progresu.replace("\n", "\n[LIGHT][I]") + "[/I][/LIGHT]"
-            # tytul_okienka_progresu  = tytul_okienka_progresu.strip("\n")  # potrzebne, jak ktoś zakomentuje 2 linijkę
-            tytul_okienka_progresu  = tytul_okienka_progresu.strip()  # znaki konca linii również są czyszczone
-            tytul_okienka_progresu += " "  # to zależy od skórki
-            # fflog(f'{tytul_okienka_progresu=}',1)
-        else:
-            tytul_okienka_progresu = "Wyszukiwanie źródeł"
-        progressDialog.create(tytul_okienka_progresu, "")
+            searchDialog = create_search_dialog(
+                title=_dlg_title, meta=_dlg_meta,
+                poster=poster or '',
+                rating=_dlg_rating,
+            )
+            progressDialog = searchDialog          # alias – nie zmienia reszty kodu
+            _search_dialog_active = True
+        except Exception:
+            fflog_exc(1)
+            _search_dialog_active = False
+            if progressDialogBG is None:
+                progressDialog = (
+                    control.progressDialog
+                    if control.setting("progress.dialog") == "0"
+                    else control.progressDialogBG
+                )
+            elif not progressDialogBG:
+                progressDialog = control.progressDialog
+            else:
+                progressDialog = control.progressDialogBG
+            yatse = control.setting("yatse") == "true"
+            if yatse:
+                progressDialog = control.progressDialogBG
+            progressDialog.create(localtvshowtitle or localtitle or 'Wyszukiwanie źródeł', '')
+
+        # Pomocnik: aktualizuje nowy dialog z surowymi danymi liczbowymi
+        def _sd_update(pct):
+            """Aktualizuje SearchSourcesDialog; ignorowany gdy dialog nieaktywny."""
+            if not _search_dialog_active:
+                return
+            try:
+                # Liczymy bezpośrednio z self.sources (bez filtrów qmax/qmin)
+                # HD/4K = źródła z jakością 4K, 1440p, 1080p, 1080i
+                # SD/720p = źródła z jakością 720p, HD, SD i pozostałe
+                _hd_q  = {'4K', '1440p', '1080p', '1080i'}
+                _sd_q  = {'720p', 'HD', 'SD'}
+                _hd_n  = sum(1 for e in self.sources if e.get('quality', '') in _hd_q and not e.get('debridonly'))
+                _sd_n  = sum(1 for e in self.sources if e.get('quality', '') not in _hd_q and not e.get('debridonly'))
+                searchDialog.update_sources(
+                    premium_total=_hd_n,
+                    free_total=_sd_n,
+                    percent=pct,
+                )
+            except Exception:
+                pass
 
         self.prepareSources()  # prepare database
 
@@ -4341,7 +4277,10 @@ class sources:
 
         line2 = control.lang(32600)  # Przygotowywanie źródeł
 
-        progressDialog.update(0, line2)
+        if _search_dialog_active:
+            searchDialog.update_sources(percent=0, status=str(line2))
+        else:
+            progressDialog.update(0, line2)
 
 
         language = self.getLanguage()
@@ -4541,7 +4480,7 @@ class sources:
                 ) >= pre_emp_limit:
                     line2 = f'Osiągnięto założony limit źródeł'
                     percent = int(100 * float(i) / (2 * timeout) + 0.5)
-                    progressDialog.update(max(1, percent), info_static)
+                    _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                     log(f'[getSources] {line2} ({pre_emp_limit})')
                     break
 
@@ -5039,9 +4978,9 @@ class sources:
                                 break
                             percent = int(100 * float(i) / (2 * timeout) + 0.5)
                             if not progressDialog == control.progressDialogBG:
-                                progressDialog.update(max(1, percent), info_static)
+                                _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                             else:
-                                progressDialog.update(max(1, percent), info_static)
+                                _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                         else:
                             if len(info) > 16:
                                 line2 = string3 % (str(len(info)))
@@ -5051,7 +4990,7 @@ class sources:
                                 #break
                                 line2 = ""
                             percent = int(100 * float(i) / (2 * timeout) + 0.5)
-                            progressDialog.update(max(1, percent), info_static)
+                            _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                             if len(info) == 0:
                                 break
                     except Exception as e:
@@ -5075,9 +5014,9 @@ class sources:
                                 break
                             percent = int(100 * float(i) / (2 * timeout) + 0.5)
                             if not progressDialog == control.progressDialogBG:
-                                progressDialog.update(max(1, percent), info_static)
+                                _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                             else:
-                                progressDialog.update(max(1, percent), info_static)
+                                _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                         else:
                             if len(info) > 6:
                                 line2 = "Waiting for: %s" % (str(len(info)))
@@ -5087,7 +5026,7 @@ class sources:
                                 #break
                                 line2 = 'Przerwanie wyszukiwania - przekroczenie czasu'
                             percent = int(100 * float(i) / (2 * timeout) + 0.5)
-                            progressDialog.update(max(1, percent), info_static)
+                            _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                             if len(info) == 0:
                                 break
                     except Exception:
@@ -5136,6 +5075,8 @@ class sources:
 
         try:
             progressDialog.close()
+            if _search_dialog_active:
+                del searchDialog
             control.sleep0(100)
         except Exception:
             pass
@@ -6224,7 +6165,27 @@ class sources:
 
         self.sources = filtered
 
-        # LEGACY AVI QUALITY BYPASS (1950-1999):
+        # CLASSIC SERIES SD BYPASS (1950-2015):
+        # Dla seriali z lat 1950-2015 SD zawsze przechodzi bez względu na qmin.
+        try:
+            if _bypass_for_classic_series:
+                _sd_sources = [s for s in sources_before_filtered_quality if s.get("quality") in ["SD", "SCR", "CAM"]]
+                if _sd_sources:
+                    _seen = set()
+                    for _x in self.sources:
+                        try:
+                            _seen.add((str(_x.get("provider", "")).lower(), str(_x.get("url", ""))))
+                        except Exception:
+                            pass
+                    for _s in _sd_sources:
+                        _k = (str(_s.get("provider", "")).lower(), str(_s.get("url", "")))
+                        if _k not in _seen:
+                            self.sources.append(_s)
+                            _seen.add(_k)
+        except Exception:
+            pass
+
+        # LEGACY AVI QUALITY BYPASS (1950-2005):
         # jeżeli AVI odpadło przez minimalną jakość (qmin), dołącz je z powrotem.
         try:
             if _allow_legacy_avi:
@@ -6454,7 +6415,10 @@ class sources:
             else:
                 if numbering:
                     #label = "[LIGHT]%02d[/LIGHT] | [LIGHT][B]%s[/B][/LIGHT] | " % (int(i + 1 + offset), p)
-                    label = "[LIGHT]{}[/LIGHT] |%s| " % (p)
+                    if source.get("on_account"):
+                        label = "[LIGHT]{}[/LIGHT] |[COLOR gold]%s[/COLOR]| " % (p)
+                    else:
+                        label = "[LIGHT]{}[/LIGHT] |%s| " % (p)
                 else:
                     label = "%s | " % (p)
 
