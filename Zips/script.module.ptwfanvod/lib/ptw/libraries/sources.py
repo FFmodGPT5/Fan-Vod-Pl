@@ -24,6 +24,11 @@ import datetime
 # --- PREMIUM AUTOPLAY POST-END GUARD (playlist clear + dialog sweep) ---
 try:
     import xbmc, xbmcgui, time as _t, threading as _th
+    def _ff_seek_resume_active():
+        try:
+            return xbmcgui.Window(10000).getProperty('FanVodPL.seek_resume_in_progress') == 'true'
+        except Exception:
+            return False
     class _FF_PremiumGuard(xbmc.Player):
         def _sweep(self, secs=2.5):
             t_end = _t.time() + secs
@@ -37,8 +42,12 @@ try:
                 try: xbmc.executebuiltin('Dialog.Close(notification)')
                 except Exception: pass
                 _t.sleep(0.12)  # ~120ms
-        def onPlayBackEnded(self): _th.Thread(target=self._sweep, daemon=True).start()
-        def onPlayBackStopped(self): _th.Thread(target=self._sweep, daemon=True).start()
+        def onPlayBackEnded(self):
+            if not _ff_seek_resume_active():
+                _th.Thread(target=self._sweep, daemon=False).start()
+        def onPlayBackStopped(self):
+            if not _ff_seek_resume_active():
+                _th.Thread(target=self._sweep, daemon=False).start()
     try:
         _FF__premium_guard_instance
     except NameError:
@@ -93,10 +102,6 @@ try:
                 _ff_xbmc.executebuiltin('Dialog.Close(notification)')
             except Exception:
                 pass
-            try:
-                _ff_xbmc.executebuiltin('Dialog.Close(all,true)')
-            except Exception:
-                pass
             # clear playlist to avoid 'unplayable index -1' chain popups
             try:
                 pl = _ff_xbmc.PlayList(_ff_xbmc.PLAYLIST_VIDEO)
@@ -105,17 +110,18 @@ try:
                 pass
 
         def onPlayBackStopped(self):
-            self._ff_silence()
+            if not _ff_seek_resume_active():
+                self._ff_silence()
 
         def onPlayBackEnded(self):
-            self._ff_silence()
+            if not _ff_seek_resume_active():
+                self._ff_silence()
 
         def onPlayBackSeek(self, time, seekOffset):
-            # pre-empt komunikaty po agresywnym przewijaniu
-            self._ff_silence()
+            return
 
         def onPlayBackSeekChapter(self, chapter):
-            self._ff_silence()
+            return
 
     # Keep a global instance so callbacks stay alive
     try:
@@ -131,7 +137,6 @@ def _ff_safe_close_ui():
     try:
         # zamknij wszystkie możliwe okna, które mogą zasłaniać/psuć sterowanie
         control.execute('Dialog.Close(progressdialog,true)')
-        control.execute('Dialog.Close(progressdialogbg,true)')
         control.execute('Dialog.Close(notification,true)')
         control.execute('Dialog.Close(busydialog,true)')
         control.execute('Dialog.Close(busydialognocancel,true)')
@@ -143,7 +148,6 @@ def _ff_safe_close_ui():
             if control.condVisibility('Player.HasMedia') or control.condVisibility('Player.Playing'):
                 control.execute('Dialog.Close(notification,true)')
                 control.execute('Dialog.Close(progressdialog,true)')
-                control.execute('Dialog.Close(progressdialogbg,true)')
                 break
         except Exception:
             pass
@@ -240,7 +244,6 @@ def _ff_return_to_last_sources(self, title, items, filtered_items, season, episo
         pass
     try:
         control.execute('Dialog.Close(progressdialog,true)')
-        control.execute('Dialog.Close(progressdialogbg,true)')
         control.execute('Dialog.Close(busydialog,true)')
         control.execute('Dialog.Close(busydialognocancel,true)')
         xbmc.executebuiltin('Dialog.Close(yesnoDialog)')
@@ -273,7 +276,6 @@ def _ff_return_to_last_sources(self, title, items, filtered_items, season, episo
     # 3) Zamknij tylko spinnery/progress – NIE zamykaj "all"
     try:
         control.execute('Dialog.Close(progressdialog,true)')
-        control.execute('Dialog.Close(progressdialogbg,true)')
         control.execute('Dialog.Close(busydialog,true)')
         control.execute('Dialog.Close(busydialognocancel,true)')
         control.execute('Dialog.Close(notification,true)')
@@ -540,6 +542,13 @@ PATTERNS_SUBSTRING = [
     _re.compile(r'k[._\- ]?i[._\- ]?n[._\- ]?o[._\- ]?w[._\- ]?a', _re.I),
 ]
 
+# --- PRECOMPILED REGEX STAŁE (RC-2 fix: nie kompiluj wewnątrz _banned() per-call) ---
+_FF_RX_IMAX = _re.compile(r'(?<![a-z0-9])imax(?![a-z0-9])', _re.I)
+_FF_RX_MAX  = _re.compile(r'(?<![a-z0-9])max(?![a-z0-9])',  _re.I)
+_FF_RX_HQ   = _re.compile(r'(?<![a-z0-9])hq(?![a-z0-9])',   _re.I)
+_FF_RX_LQ   = _re.compile(r'(?<![a-z0-9])lq(?![a-z0-9])',   _re.I)
+# --- END PRECOMPILED REGEX ---
+
 # --- AI SZTUCZNY LEKTOR (wykrywanie po labelu/etykiecie) ---
 AI_LEKTOR_PATTERNS = (
     "ai lektor",
@@ -602,12 +611,46 @@ def _has_any(rx_list, text: str) -> bool:
     return False
 # ========== [END] BANNED PHRASES – GLOBAL ==========
 
+
+def _ff_count_sources_once(sources, qmax: int, qmin: int):
+    """Jednorazowe przejście O(n) przez self.sources zamiast 5 osobnych list-comprehension.
+
+    RC-3 fix: przy 300+ źródłach i 240 iteracjach pętli oszczędza ~1 200 skanów.
+    Logika identyczna z oryginalnym blokiem warunkowym.
+    Zwraca: (source_4k, source_1440, source_1080, source_720, source_sd)
+    """
+    s4k = s1440 = s1080 = s720 = ssd = 0
+    for e in sources:
+        try:
+            q  = e.get("quality", "")
+            do = e.get("debridonly", False)
+            if do:
+                continue
+            if qmax == 0 and q == "4K":
+                s4k += 1
+            elif qmax <= 1 and qmin >= 1 and q == "1440p":
+                s1440 += 1
+            elif qmax <= 2 and qmin >= 2 and q in ("1080p", "1080i"):
+                s1080 += 1
+            elif qmax <= 3 and qmin >= 3 and q in ("720p", "HD"):
+                s720 += 1
+            elif qmax <= 4 and qmin >= 4 and q == "SD":
+                ssd += 1
+        except Exception:
+            continue
+    return s4k, s1440, s1080, s720, ssd
+
+
 def _ff_detect_part(item):
     """
     Wykrywanie PART 1 / PART 2 – tylko po jawnych oznaczeniach w źródle (label/url/nazwa pliku):
       - part/pt, część/czesc/cz, 1of2/2of2, cd/disc
     Cel: nie łapać fałszywie nazw odcinków typu „Rozdział pierwszy / Chapter One”.
     """
+    # Priorytet: sprawdź czy item ma wymuszony tag Part (dla łączonych odcinków)
+    if item.get('_force_part_label'):
+        return item['_force_part_label'] + ' ✅'
+
     try:
         txt = " ".join([
             str(item.get("label", "")),
@@ -620,23 +663,55 @@ def _ff_detect_part(item):
     except Exception:
         txt = ""
 
-    # normalizacja separatorów (żeby złapać np. 'part1', 'cz.1', 'cd2' itp.)
+    return _ff_detect_part_text(txt)
+
+
+def _ff_detect_part_text(text):
+    """Wspólne wykrywanie PART 1 / PART 2 z dowolnego tekstu.
+    Używane dla nazw źródeł oraz jako fallback dla tytułu odcinka z GUI/meta.
+    """
+    try:
+        txt = str(text or "").lower()
+    except Exception:
+        txt = ""
+
     txt = txt.replace("_", " ").replace(".", " ").replace("-", " ").replace("/", " ")
 
-    # kolejność: najpierw PART 2, potem PART 1
-    if (re.search(r"\b(part|pt)\s*0?2\b", txt) or
-        re.search(r"\b(cz|czesc|część)\s*0?2\b", txt) or
-        re.search(r"\b2\s*of\s*2\b", txt) or
-        re.search(r"\b(cd|disc)\s*0?2\b", txt) or
-        re.search(r"\bfinale\s*2\b", txt)):
-        return "PART 2 ✅"
+    part2_patterns = (
+        r"\b(part|pt)\s*0?2\b",
+        r"\b(part|pt)\s*(ii|two)\b",
+        r"\b(cz|czesc|część)\s*0?2\b",
+        r"\b(cz|czesc|część)\s*ii\b",
+        r"\b(cz|czesc|część)\s*(druga|drugi|drugie)\b",
+        r"\b2\s*of\s*2\b",
+        r"\b2of2\b",
+        r"\b2\s*z\s*2\b",
+        r"\b(cd|disc|disk|dvd|vol|volume)\s*0?2\b",
+        r"\b(cd|disc|disk|dvd|vol|volume)\s*ii\b",
+        r"\bfinale\s*(2|ii|two)\b",
+        r"\bp\s*0?2\b",
+    )
+    for rx in part2_patterns:
+        if re.search(rx, txt):
+            return "PART 2 ✅"
 
-    if (re.search(r"\b(part|pt)\s*0?1\b", txt) or
-        re.search(r"\b(cz|czesc|część)\s*0?1\b", txt) or
-        re.search(r"\b1\s*of\s*2\b", txt) or
-        re.search(r"\b(cd|disc)\s*0?1\b", txt) or
-        re.search(r"\bfinale\s*1\b", txt)):
-        return "PART 1 ✅"
+    part1_patterns = (
+        r"\b(part|pt)\s*0?1\b",
+        r"\b(part|pt)\s*(i|one)\b",
+        r"\b(cz|czesc|część)\s*0?1\b",
+        r"\b(cz|czesc|część)\s*i\b",
+        r"\b(cz|czesc|część)\s*(pierwsza|pierwszy|pierwsze)\b",
+        r"\b1\s*of\s*2\b",
+        r"\b1of2\b",
+        r"\b1\s*z\s*2\b",
+        r"\b(cd|disc|disk|dvd|vol|volume)\s*0?1\b",
+        r"\b(cd|disc|disk|dvd|vol|volume)\s*i\b",
+        r"\bfinale\s*(1|i|one)\b",
+        r"\bp\s*0?1\b",
+    )
+    for rx in part1_patterns:
+        if re.search(rx, txt):
+            return "PART 1 ✅"
 
     return "NIEZNANE ?"
 
@@ -673,7 +748,7 @@ class sources:
                 url_box['v'] = self.sourcesResolve(item)
             except Exception as e:
                 err_box['e'] = e
-        t = threading.Thread(target=_worker, name='FFResolveWorker', daemon=True)
+        t = threading.Thread(target=_worker, name='FFResolveWorker', daemon=False)
         try:
             t.start()
         except Exception:
@@ -905,6 +980,9 @@ class sources:
         def ok_movie(it):
             size = self._extract_size_gb(it)
             if size is None:
+                # LEGACY MOVIE (1950-2005): brak rozmiaru nie dyskwalifikuje źródła
+                if _legacy_movie:
+                    return True
                 # brak rozmiaru: odrzuć TYLKO premium
                 return not self._is_premium_provider(it)
 
@@ -964,6 +1042,69 @@ class sources:
         else:
             return [it for it in items if ok_movie(it)]
 
+    def _apply_size_limits_with_fallback(self, items):
+        """
+        Jak _apply_size_limits, ale jeśli wynik jest pusty,
+        robi drugi pass z obniżonymi progami minimalnymi:
+          FHD: min 7->4 GB, 720p: min 4->2 GB
+        Jeśli fallback cokolwiek znajdzie - pokazuje notyfikacje ostrzegawcza.
+        """
+        result = self._apply_size_limits(items)
+        if result:
+            return result
+
+        if not items or self._is_tvshow_meta():
+            return result
+
+        limits = self._get_limit_values()
+        _legacy_movie = getattr(self, '_ff_allow_legacy_avi', False)
+
+        FALLBACK_FHD_MIN = 4.0
+        FALLBACK_720_MIN = 2.0
+
+        def ok_fallback(it):
+            size = self._extract_size_gb(it)
+            if size is None:
+                return not self._is_premium_provider(it)
+            is_multi = ((it.get("language") or "").lower() in ("multi", "mul") or
+                        re.search(r'(?<![a-z0-9])multi(?![a-z0-9])',
+                                  " ".join([str(it.get("label", "")),
+                                            str(it.get("info", "")),
+                                            str(it.get("extrainfo", "")),
+                                            str(it.get("url", ""))]), re.I))
+            if is_multi:
+                mi, ma = FALLBACK_FHD_MIN, limits["limit_multi_max"]
+            else:
+                res = self._quality_of(it)
+                if res == "2160p":
+                    mi, ma = limits["limit_4k_min"], limits["limit_4k_max"]
+                elif res == "1080p":
+                    mi, ma = FALLBACK_FHD_MIN, limits["limit_fhd_max"]
+                elif res == "720p":
+                    mi, ma = FALLBACK_720_MIN, limits["limit_720_max"]
+                else:
+                    mi, ma = None, None
+            if mi is not None and size < mi and not _legacy_movie:
+                return False
+            if ma is not None and size > ma:
+                return False
+            return True
+
+        fallback_result = [it for it in items if ok_fallback(it)]
+        if fallback_result:
+            try:
+                import xbmcgui
+                xbmcgui.Dialog().notification(
+                    "FanVodPL - niska jakość",
+                    "Plik poniżej min. progu GB - jakość może być gorsza",
+                    xbmcgui.NOTIFICATION_WARNING,
+                    6000
+                )
+            except Exception:
+                pass
+            fflog('[AUTO JAKOSC] fallback GB: brak zrodel w normalnym progu, znaleziono w obnizonym (FHD>=4GB / 720p>=2GB)', 1, 1)
+        return fallback_result
+
     def _show_auto_quality_settings(self):
         # Menu główne ustawień: Limity GB / Serwery źródeł PL
         import xbmcgui, xbmcaddon
@@ -1018,10 +1159,8 @@ class sources:
                 return False
             # EXCEPTION: IMAX/MAX in safe, disc-quality MULTI contexts (4K/1080p)
             try:
-                rx_imax = re.compile(r'(?<![a-z0-9])imax(?![a-z0-9])', re.I)
-                rx_max  = re.compile(r'(?<![a-z0-9])max(?![a-z0-9])', re.I)
-                is_imax = bool(rx_imax.search(t))
-                is_max  = bool(rx_max.search(t)) and not is_imax  # don't double-count IMAX
+                is_imax = bool(_FF_RX_IMAX.search(t))
+                is_max  = bool(_FF_RX_MAX.search(t)) and not is_imax  # don't double-count IMAX
                 if is_imax:
                     # Always allow IMAX token (avoid false-positive on 'max')
                     return False
@@ -1037,10 +1176,8 @@ class sources:
 
             # EXCEPTION: allow 'hq' ONLY for 4K / FullHD MULTI disc-quality releases
             try:
-                rx_hq = re.compile(r'(?<![a-z0-9])hq(?![a-z0-9])', re.I)
-                rx_lq = re.compile(r'(?<![a-z0-9])lq(?![a-z0-9])', re.I)
-                has_hq = bool(rx_hq.search(t))
-                has_lq = bool(rx_lq.search(t))
+                has_hq = bool(_FF_RX_HQ.search(t))
+                has_lq = bool(_FF_RX_LQ.search(t))
                 if has_hq and not has_lq:
                     is_4k   = re.search(r'(?:2160p|\b4k\b)', t, re.I)
                     is_fhd  = re.search(r'(?:1080p|full\s*hd|fullhd)', t, re.I)
@@ -1151,9 +1288,11 @@ class sources:
 
             # 2) Limity GB – tylko na premium
             try:
-                prem_limited = self._apply_size_limits(prem_items_raw) if prem_items_raw else prem_items_raw
+                prem_limited = self._apply_size_limits_with_fallback(prem_items_raw) if prem_items_raw else prem_items_raw
             except Exception:
                 prem_limited = prem_items_raw
+
+            fflog(f'[AUTO JAKOŚĆ] po podziale: prem_raw={len(prem_items_raw or [])}, free_raw={len(free_items_raw or [])}, po size_limits: prem_limited={len(prem_limited or [])}', 1, 1)
 
             # 3) HARD BLOCKERS (frazy z PDF + wyjątki) – tylko premium
             import re as _re
@@ -1231,6 +1370,8 @@ class sources:
             except Exception:
                 pass
 
+            fflog(f'[AUTO JAKOŚĆ] po HARD BLOCKERS: prem_limited={len(prem_limited or [])} (classic_series_bypass={getattr(self, "_ff_bypass_classic_series", False)}, legacy_avi={_allow_legacy_avi})', 1, 1)
+
             prem_effective = prem_limited or []
             # 3b) HARD QUALITY FLOOR dla PREMIUM — WYŁĄCZONY (zostawiamy pełną listę; jakość filtrowana później na poziomie hosta)
             try:
@@ -1276,7 +1417,7 @@ class sources:
                 u = str(_it.get("url", "")).lower()
                 if not u:
                     return False
-                return (_rx_lektor.search(u) is not None) or (_rx_dubbing.search(u) is not None) or (_rx_subs.search(u) is not None) or (_rx_multi.search(u) is not None)
+                return (_rx_lektor.search(u) is not None) or (_rx_dubbing.search(u) is not None) or (_rx_subs.search(u) is not None) or (_rx_multi.search(u) is not None) or (_rx_pl_tok.search(u) is not None)
 
             def _is_subs_only(_it) -> bool:
                 t = _tmeta(_it)
@@ -1365,15 +1506,21 @@ class sources:
 
             # 3c) HARD LANGUAGE TAG FLOOR dla PREMIUM — ukrywamy PREMIUM, jeśli brak bezpiecznych tagów językowych w URL
             # CLASSIC SERIES BYPASS (1950-2015): stare seriale nie mają polskich tagów w URL — przepuszczamy wszystko
+            # LEGACY MOVIE BYPASS (1950-2005): stare filmy też mogą nie mieć tagów w URL
             try:
-                if getattr(self, "_ff_bypass_classic_series", False):
-                    pass  # bypass: zostawiamy prem_effective bez filtrowania po języku URL
+                _legacy_movie_bypass = _ff_is_legacy_decades(getattr(self, "_ff_release_year", None))
+                if getattr(self, "_ff_bypass_classic_series", False) or _legacy_movie_bypass:
+                    fflog(f'[AUTO JAKOŚĆ] 3c lang_tag_floor: BYPASS aktywny (legacy_movie={_legacy_movie_bypass}, classic_series={getattr(self, "_ff_bypass_classic_series", False)}) — prem_effective={len(prem_effective)}', 1, 1)
+                    pass  # bypass: stare filmy (1950-2005) i stare seriale (1950-2015)
                 else:
                     _prem_lang = []
                     for _it in (prem_effective or []):
                         if _has_lang_tag_in_url(_it):
                             _prem_lang.append(_it)
+                        else:
+                            fflog(f'[AUTO JAKOŚĆ] 3c lang_tag_floor: odrzucono (brak tagu PL w URL): {str(_it.get("url",""))[:80]}', 1, 1)
                     prem_effective = _prem_lang
+                    fflog(f'[AUTO JAKOŚĆ] 3c lang_tag_floor: po filtrze prem_effective={len(prem_effective)}', 1, 1)
             except Exception:
                 pass
 
@@ -1381,14 +1528,55 @@ class sources:
             options = []
             payloads = []
 
+            def _ff_unique_host_count(_seq):
+                try:
+                    return len(set(
+                        str((_it.get("provider") or _it.get("source") or "?")).lower()
+                        for _it in (_seq or [])
+                    ))
+                except Exception:
+                    return 0
+
+            prem_host_count = _ff_unique_host_count(prem_effective)
+            free_host_count = _ff_unique_host_count(free_effective)
+
             if prem_effective:
-                options.append("PREMIUM")
+                options.append("PREMIUM — %d źródeł | %d hostów" % (len(prem_effective), prem_host_count))
                 payloads.append("premium")
             if free_effective:
-                options.append("----------------\nDARMOWE")
+                options.append("----------------\nDARMOWE — %d źródeł | %d hostów" % (len(free_effective), free_host_count))
                 payloads.append("free")
 
             if not options:
+                # XVID FALLBACK: jesli lista calkowicie pusta, przepusc xvid/avi z ostrzezeniem
+                try:
+                    import re as _re_xvid
+                    _xvid_cand = [
+                        it for it in (items_all or [])
+                        if _re_xvid.search(r'\bxvid\b|\.avi\b|xvid', " ".join([
+                            str(it.get("info", "")), str(it.get("extrainfo", "")),
+                            str(it.get("label", "")), str(it.get("url", ""))
+                        ]), _re_xvid.I)
+                    ]
+                except Exception:
+                    _xvid_cand = []
+
+                if _xvid_cand:
+                    fflog('[AUTO JAKOSC] xvid fallback: brak normalnych zrodel, przepuszczam xvid z ostrzezeniem', 1, 1)
+                    try:
+                        xbmcgui.Dialog().notification(
+                            "FanVodPL - bardzo niska jakość",
+                            "Dostępne tylko źródła XviD/AVI — jakość znacznie poniżej standardu",
+                            xbmcgui.NOTIFICATION_WARNING,
+                            8000
+                        )
+                    except Exception:
+                        pass
+                    options.append("[COLOR red][B]⚠ TYLKO XVID/AVI — bardzo niska jakość[/B][/COLOR]")
+                    payloads.append("xvid_fallback")
+                    # tymczasowo udostepnij xvid jako free
+                    free_effective = _xvid_cand
+                fflog(f'[AUTO JAKOŚĆ] Brak opcji do wyświetlenia — prem_effective={len(prem_effective)}, free_effective={len(free_effective)} → ANULUJ', 1, 1)
                 try:
                     from resources.lib.modules import control
                     control.infoDialog("Brak dostępnych źródeł.", "FanVodPL", time=3000)
@@ -1396,10 +1584,13 @@ class sources:
                     pass
                 return ("__CANCEL__", None)
 
-            try:
-                idx = xbmcgui.Dialog().select("Wybierz źródła — %s" % title, options)
-            except Exception:
-                idx = -1
+            if len(payloads) == 1:
+                idx = 0
+            else:
+                try:
+                    idx = xbmcgui.Dialog().select("Wybierz źródła — %s" % title, options)
+                except Exception:
+                    idx = -1
 
             if idx < 0 or idx >= len(payloads):
                 return ("__CANCEL__", None)
@@ -1432,12 +1623,35 @@ class sources:
                 else:
                     chosen_items = None
                     chosen_host_name = "PREMIUM"
+                    chosen_host_ui_note = ""
 
                     if len(host_keys) == 1:
-                        # Tylko jeden host PREMIUM – nie ma sensu pytać użytkownika
+                        # Tylko jeden host PREMIUM
                         info = host_map[host_keys[0]]
                         chosen_items = info.get("items") or []
                         chosen_host_name = info.get("name") or host_keys[0]
+                        # Sprawdz czy plik jest ponizej progu GB — jesli tak, pokaz dialog z ostrzezeniem
+                        try:
+                            _limits_1h = self._get_limit_values()
+                            _size_gb_1h = None
+                            _res_1h = None
+                            for _ci in (chosen_items or []):
+                                _s = self._extract_size_gb(_ci)
+                                if _s is not None:
+                                    _size_gb_1h = _s
+                                    _res_1h = self._quality_of(_ci)
+                                    break
+                            _below_1h = False
+                            if _size_gb_1h is not None and _res_1h is not None:
+                                if _res_1h == "1080p" and _size_gb_1h < _limits_1h["limit_fhd_min"]:
+                                    _below_1h = True
+                                elif _res_1h == "720p" and _size_gb_1h < _limits_1h["limit_720_min"]:
+                                    _below_1h = True
+                            if _below_1h and not self._is_tvshow_meta():
+                                _min_1h = _limits_1h["limit_fhd_min"] if _res_1h == "1080p" else _limits_1h["limit_720_min"]
+                                chosen_host_ui_note = "⚠ niska jakość (%.2f GB < min. %.0f GB)" % (_size_gb_1h, _min_1h)
+                        except Exception:
+                            pass
                     else:
                         # Lista aktywnych hostów PREMIUM (nopremium / xt7 / rapideo ...)
                         try:
@@ -1527,10 +1741,31 @@ class sources:
                                 # --- on_account: złoty kolor jeśli jakikolwiek link hosta jest na koncie ---
                                 if any(_it.get("on_account") for _it in links):
                                     prov_name = "[COLOR gold]%s[/COLOR]" % prov_name
-                                options_hosts.append(prov_name)
+                                # --- ostrzezenie: plik ponizej normalnego progu GB (fallback) ---
+                                try:
+                                    _limits_warn = self._get_limit_values()
+                                    _warn_gb = size_gb if size_gb > 0 else None
+                                    _warn_res = self._quality_of(_best_for_host) if _best_for_host else None
+                                    _below_min = False
+                                    if _warn_gb is not None and _warn_res is not None:
+                                        if _warn_res == "1080p" and _warn_gb < _limits_warn["limit_fhd_min"]:
+                                            _below_min = True
+                                        elif _warn_res == "720p" and _warn_gb < _limits_warn["limit_720_min"]:
+                                            _below_min = True
+                                    if _below_min and not self._is_tvshow_meta():
+                                        _min_gb = _limits_warn["limit_fhd_min"] if _warn_res == "1080p" else _limits_warn["limit_720_min"]
+                                        prov_name = "%s  [COLOR orange][B]⚠ niska jakość (%.2f GB < min. %.0f GB)[/B][/COLOR]" % (
+                                            prov_name, _warn_gb, _min_gb
+                                        )
+                                except Exception:
+                                    pass
+                                options_hosts.append("%s | %d plików | %s | %s" % (prov_name, len(links), qh_str, size_str))
                                 payloads_hosts.append(key)
                             if options_hosts:
-                                idx_host = xbmcgui.Dialog().select("Wybierz host PREMIUM — %s" % title, options_hosts)
+                                idx_host = xbmcgui.Dialog().select(
+                                    "Wybierz host PREMIUM (%d hostów / %d źródeł) — %s" % (len(host_keys), len(base_seq or []), title),
+                                    options_hosts
+                                )
                             else:
                                 idx_host = -1
                         except Exception:
@@ -1561,9 +1796,10 @@ class sources:
                             q = self._quality_of(_it)
                         except Exception:
                             q = None
-                        # filtr jakości: tylko 4K/FULLHD/HD — wyjątek: classic series (1950-2015) mogą mieć SD
+                        # filtr jakości: tylko 4K/FULLHD/HD — wyjątek: classic series (1950-2015) i legacy movie (1950-2005) mogą mieć SD
                         _classic_bypass = getattr(self, "_ff_bypass_classic_series", False)
-                        if q not in ("2160p", "1080p", "720p") and not _classic_bypass:
+                        _legacy_movie_q = _ff_is_legacy_decades(getattr(self, "_ff_release_year", None))
+                        if q not in ("2160p", "1080p", "720p") and not _classic_bypass and not _legacy_movie_q:
                             return
                         if q == "2160p":
                             q_str = "4K (2160p)"
@@ -1622,6 +1858,50 @@ class sources:
                     except Exception:
                         pass
 
+                    # === DODAJ SEPARATORY PART 1 / PART 2 ===
+                    try:
+                        if options_best:
+                            # Sprawdź czy są Part 1 i Part 2
+                            has_p1 = any("PART 1" in str(opt).upper() for opt in options_best)
+                            has_p2 = any("PART 2" in str(opt).upper() for opt in options_best)
+                            
+                            if has_p1 and has_p2:
+                                # Wstaw separatory
+                                new_options = []
+                                new_payloads = []
+                                prev_part = None
+                                
+                                for i, (opt, pay) in enumerate(zip(options_best, payloads_best)):
+                                    opt_upper = str(opt).upper()
+                                    
+                                    # Wykryj Part
+                                    if "PART 1" in opt_upper:
+                                        current_part = 1
+                                    elif "PART 2" in opt_upper:
+                                        current_part = 2
+                                    else:
+                                        current_part = None
+                                    
+                                    # Dodaj separator gdy zmienia się Part
+                                    if current_part != prev_part and current_part is not None:
+                                        if current_part == 1:
+                                            new_options.append("[COLOR yellow][B]========== PART 1 ==========[/B][/COLOR]")
+                                            new_payloads.append(None)  # placeholder
+                                        elif current_part == 2:
+                                            new_options.append("[COLOR cyan][B]========== PART 2 ==========[/B][/COLOR]")
+                                            new_payloads.append(None)  # placeholder
+                                    
+                                    new_options.append(opt)
+                                    new_payloads.append(pay)
+                                    prev_part = current_part
+                                
+                                options_best = new_options
+                                payloads_best = new_payloads
+                                fflog(f"[PART-SEPARATOR] Dodano separatory Part 1/2 do listy linków", 0)
+                    except Exception:
+                        fflog_exc(1)
+                    # === END SEPARATORY ===
+
                     # Zbieramy wszystkie linki z wybranego hosta
                     all_items = list(base_seq or [])
                    # MULTI (audio wielojęzyczne / multi)
@@ -1658,15 +1938,53 @@ class sources:
                     except Exception:
                         pass
 
+                    # LEGACY MOVIE (1950-2005): dodaj też linki bez PL (oryginał, angielski itp.)
+                    try:
+                        if _ff_is_legacy_decades(getattr(self, "_ff_release_year", None)):
+                            _already = set(id(x) for x in payloads_best)
+                            for it in all_items:
+                                if id(it) not in _already:
+                                    _add_option_if_ok(it, "Oryginał")
+                    except Exception:
+                        pass
+
                     if options_best:
+                        _dialog_note_parts = []
+                        try:
+                            _double_ep_note = str(getattr(self, "_ff_double_ep_ui_note", "") or "").strip()
+                        except Exception:
+                            _double_ep_note = ""
+                        if _double_ep_note:
+                            _dialog_note_parts.append(_double_ep_note)
+                        if chosen_host_ui_note:
+                            _dialog_note_parts.append(chosen_host_ui_note)
                         if ai_flag:
-                            heading_best = "UWAGA: wykryto LEKTORA AI. Wybierz plik — %s" % (str(chosen_host_name) or "").upper()
-                        else:
-                            heading_best = "Wybierz plik — %s" % (str(chosen_host_name) or "").upper()
-                        idx_best = xbmcgui.Dialog().select(heading_best, options_best)
-                        if idx_best < 0 or idx_best >= len(payloads_best):
-                            return ("__CANCEL__", None)
-                        best = payloads_best[idx_best]
+                            _dialog_note_parts.insert(0, "UWAGA: wykryto LEKTORA AI")
+                        _dialog_suffix = ""
+                        if _dialog_note_parts:
+                            _dialog_suffix = " | " + " | ".join(_dialog_note_parts)
+                        heading_best = "Wybierz plik (%d pozycji) — %s%s" % (
+                            len([_p for _p in payloads_best if _p is not None]),
+                            (str(chosen_host_name) or "").upper(),
+                            _dialog_suffix
+                        )
+                        
+                        # Pętla obsługi wyboru (ignoruj kliknięcia na separatory)
+                        while True:
+                            idx_best = xbmcgui.Dialog().select(heading_best, options_best)
+                            if idx_best < 0:
+                                return ("__CANCEL__", None)
+                            if idx_best >= len(payloads_best):
+                                return ("__CANCEL__", None)
+                            
+                            # Sprawdź czy kliknięto separator (None)
+                            if payloads_best[idx_best] is None:
+                                # Ignoruj kliknięcie na separator, pokaż dialog ponownie
+                                continue
+                            
+                            # Poprawny wybór
+                            best = payloads_best[idx_best]
+                            break
                     else:
                         # Jeśli po filtrach nic nie zostało, fallback do najlepszego dostępnego źródła
                         best = _best_source(base_seq)
@@ -1725,10 +2043,21 @@ class sources:
                             size_str = "%.2f GB" % size_gb
                         else:
                             size_str = "brak danych"
-                        options_hosts.append("%s | %s | %s" % (prov, q_str, size_str))
+                        try:
+                            part_tag = _ff_detect_part(_it)
+                        except Exception:
+                            part_tag = "NIEZNANE ?"
+                        options_hosts.append("%s | %s | %s | [%s]" % (prov, q_str, size_str, part_tag))
                         payloads_hosts.append(_it)
                     if options_hosts:
-                        idx_host = xbmcgui.Dialog().select("Wybierz darmowy host — %s" % title, options_hosts)
+                        try:
+                            _double_ep_note = str(getattr(self, "_ff_double_ep_ui_note", "") or "").strip()
+                        except Exception:
+                            _double_ep_note = ""
+                        _free_heading = "Wybierz darmowy host (%d pozycji) — %s" % (len(options_hosts), title)
+                        if _double_ep_note:
+                            _free_heading = "%s | %s" % (_free_heading, _double_ep_note)
+                        idx_host = xbmcgui.Dialog().select(_free_heading, options_hosts)
                     else:
                         idx_host = -1
                 except Exception:
@@ -2323,6 +2652,10 @@ class sources:
         poster = meta.get("poster") or ""
         # fflog(f'{poster=}',1,1)
 
+        try:
+            setattr(self, "_ff_double_ep_ui_note", "")
+        except Exception:
+            pass
 
         if not items:
             # pobranie źródeł (wyszukiwanie)
@@ -2360,69 +2693,115 @@ class sources:
                     has_part1 = _items_have_part(items, 1)
                     has_part2 = _items_have_part(items, 2)
 
-                    fflog(f"[DOUBLE-EP] {_episode_i=} {has_part1=} {has_part2=} items_count={len(items)}", 0)
-
                     part1_items = _items_with_part(items, 1)
                     part2_items = _items_with_part(items, 2)
 
+                    # Fallback: jeśli same linki nie mają tagu PART, sprawdź tytuł aktualnego odcinka z GUI/meta.
+                    # To naprawia przypadki typu „część I” widoczne w liście odcinków, ale niewidoczne w nazwie pliku/linku.
+                    _episode_part_hint = _ff_detect_part_text(" ".join([
+                        str(title or ""),
+                        str(localtitle or ""),
+                        str(originalname or ""),
+                    ]))
+                    if not has_part1 and not has_part2 and _episode_part_hint.upper().startswith("PART 1"):
+                        has_part1 = True
+                        part1_items = list(items or [])
+                        for it in part1_items:
+                            it['_force_part_label'] = 'PART 1'
+                        fflog(f"[DOUBLE-EP] Fallback: PART 1 rozpoznany z tytułu/meta odcinka -> {_episode_part_hint}", 0)
+
+                    fflog(f"[DOUBLE-EP] {_episode_i=} {has_part1=} {has_part2=} items_count={len(items)} hint={_episode_part_hint}", 0)
+
+                    # Oznacz Part 1 i Part 2 dla sortowania/wyświetlania
+                    for it in part1_items:
+                        it['_force_part_label'] = 'PART 1'
+                    for it in part2_items:
+                        it['_force_part_label'] = 'PART 2'
+
                     if has_part1 and has_part2:
-                        # === SCENARIUSZ A: oba Parts już w items — pytaj od razu ===
+                        # === SCENARIUSZ A: oba Parts już w items — łączymy wszystkie linki ===
                         fflog(f"[DOUBLE-EP] Scenariusz A: oba Parts w items (p1={len(part1_items)}, p2={len(part2_items)})", 0)
+                        # NIE pytamy użytkownika - łączymy Part 1 + Part 2
+                        items = part1_items + part2_items
+                        select = "0"  # wyłącz autoplay - pokaż dialogi wyboru
+                        fflog(f"[DOUBLE-EP] Połączono Part 1 + Part 2, total={len(items)}, wymuszam tryb ręczny", 0)
+                        
                         try:
-                            import xbmcgui as _xbmcgui_dep
-                            _choice = _xbmcgui_dep.Dialog().select(
-                                "Odcinek podzielony — wybierz część",
-                                [
-                                    "▶  Part 1  (pierwsza część odcinka)",
-                                    "▶  Part 2  (druga część odcinka)",
-                                ]
-                            )
-                            if _choice == 1:
-                                items = part2_items
-                                fflog("[DOUBLE-EP] Użytkownik wybrał Part 2", 0)
-                            elif _choice == 0:
-                                items = part1_items
-                                fflog("[DOUBLE-EP] Użytkownik wybrał Part 1", 0)
-                            else:
-                                items = part1_items  # anuluj → domyślnie Part 1
-                                fflog("[DOUBLE-EP] Dialog anulowany → domyślnie Part 1", 0)
+                            setattr(self, "_ff_double_ep_ui_note", "PART 1 + PART 2")
                         except Exception:
-                            fflog_exc(1)
+                            pass
 
                     elif has_part1 and not has_part2:
-                        # === SCENARIUSZ B: tylko Part1 — szukaj Part2 w paired episode (E+1) ===
+                        # === SCENARIUSZ B: tylko Part1 — szukaj Part2 w dwóch miejscach ===
+                        # 1) Ten sam sezon, następny odcinek (E+1)
+                        # 2) Następny sezon, pierwszy odcinek (S+1, E01) - dla finałów sezonu
+                        
+                        fflog(f"[DOUBLE-EP] Scenariusz B: szukam Part2", 0)
+                        try:
+                            setattr(self, "_ff_double_ep_ui_note", "PART 1 | szukanie PART 2")
+                        except Exception:
+                            pass
+                        
+                        # Szukaj w następnym odcinku tego samego sezonu (S01E26 → S01E27)
                         _pair_ep = str(_episode_i + 1)
-                        fflog(f"[DOUBLE-EP] Scenariusz B: szukam Part2 w E{_pair_ep}", 0)
+                        fflog(f"[DOUBLE-EP] Próba 1: szukam Part2 w S{_season_i}E{_pair_ep}", 0)
                         try:
                             extra_items = self.getSources(
                                 title, localtitle, year, imdb, tvdb, tmdb, season, _pair_ep,
-                                tvshowtitle, premiered, originalname, duration, poster
+                                tvshowtitle, premiered, originalname, duration, poster,
+                                _part_label='PART 2'
                             )
+                            # W tym samym sezonie TYLKO linki z tagiem Part 2
+                            extra_part2 = _items_with_part(extra_items, 2)
+                            fflog(f"[DOUBLE-EP] Part2 z S{_season_i}E{_pair_ep}: {len(extra_part2)}", 0)
                         except Exception:
-                            extra_items = []
-
-                        extra_part2 = _items_with_part(extra_items, 2)
-                        fflog(f"[DOUBLE-EP] Znaleziono Part2 z E{_pair_ep}: {len(extra_part2)}", 0)
+                            fflog_exc(1)
+                        
+                        # Jeśli nie znaleziono Part 2, pokaż komunikat
+                        if not extra_part2:
+                            _next_season = str(_season_i + 1)
+                            fflog(f"[DOUBLE-EP] Nie znaleziono Part 2 w S{_season_i}E{_pair_ep}", 0)
+                            try:
+                                setattr(self, "_ff_double_ep_ui_note", "Tylko PART 1 | możliwy PART 2: sezon %s, odc. 1" % _next_season)
+                            except Exception:
+                                pass
+                            try:
+                                xbmcgui.Dialog().notification(
+                                    'Tylko Part 1',
+                                    f'Part 2 prawdopodobnie w sezonie {_next_season} jako odcinek 1',
+                                    xbmcgui.NOTIFICATION_WARNING,
+                                    5000
+                                )
+                            except Exception:
+                                pass
 
                         if extra_part2:
+                            # NIE pytamy użytkownika - łączymy Part 1 + Part 2
+                            items = part1_items + extra_part2
+                            select = "0"  # wyłącz autoplay - pokaż dialogi wyboru
+                            fflog(f"[DOUBLE-EP] Połączono Part 1 + Part 2, total={len(items)}, wymuszam tryb ręczny", 0)
+                            
                             try:
-                                import xbmcgui as _xbmcgui_dep
-                                _choice = _xbmcgui_dep.Dialog().select(
-                                    "Odcinek podzielony — wybierz część",
-                                    [
-                                        "▶  Part 1  (pierwsza część odcinka)",
-                                        "▶  Part 2  (druga część odcinka)",
-                                    ]
-                                )
-                                if _choice == 1:
-                                    items = extra_part2
-                                    fflog("[DOUBLE-EP] Użytkownik wybrał Part 2", 0)
-                                elif _choice == 0:
-                                    fflog("[DOUBLE-EP] Użytkownik wybrał Part 1 (items bez zmian)", 0)
-                                else:
-                                    fflog("[DOUBLE-EP] Dialog anulowany → domyślnie Part 1", 0)
+                                setattr(self, "_ff_double_ep_ui_note", "PART 1 + PART 2")
                             except Exception:
-                                fflog_exc(1)
+                                pass
+                        else:
+                            fflog("[DOUBLE-EP] Nie znaleziono Part 2, pozostawiam tylko Part 1", 0)
+                            try:
+                                setattr(self, "_ff_double_ep_ui_note", "Tylko PART 1")
+                            except Exception:
+                                pass
+                            
+                            # Powiadomienie użytkownika
+                            try:
+                                xbmcgui.Dialog().notification(
+                                    'Tylko Part 1',
+                                    'Nie znaleziono Part 2. Pokazuję tylko linki z Part 1',
+                                    xbmcgui.NOTIFICATION_WARNING,
+                                    4000
+                                )
+                            except Exception:
+                                pass
 
             except Exception:
                 fflog_exc(1)
@@ -2442,8 +2821,8 @@ class sources:
                 except Exception:
                     self._ff_ctx_year = None
 
-                # WAŻNE: dla odcinków podzielonych (PART 1/2) zostawiamy bypass dialogu jakości,
-                # bo pod rząd lecą dwa dialogi (wybór PART + AUTO JAKOŚĆ) i na Android/Kodi bywa ANULUJ=-1.
+                # WAŻNE: Dla odcinków z PART 1/2 select już został ustawiony na "0" (tryb ręczny),
+                # więc dialogi jakości i wyboru będą się pokazywać normalnie.
                 _is_part = False
                 try:
                     _is_part = any(_ff_detect_part(_it).upper().startswith("PART ") for _it in (items or []))
@@ -2452,15 +2831,8 @@ class sources:
 
                 _autoplay_mode = (control.setting("hosts.mode") == "2")
 
-                if _is_part and _autoplay_mode:
-                    # przy autoplay + PART pomijamy dialog jakości żeby nie było dwóch dialogów pod rząd
-                    chosen_label, filtered_items = ("__SINGLE__", items)
-                    fflog('[AUTO JAKOŚĆ] PART + autoplay -> bypass dialog jakości', 1, 1)
-                elif len(items) == 1 and _is_part:
-                    chosen_label, filtered_items = ("__SINGLE__", items)
-                    fflog('[AUTO JAKOŚĆ] single source + PART -> bypass dialog', 1, 1)
-                else:
-                    chosen_label, filtered_items = self._auto_quality_dialog_and_filter(title, items)
+                # Bypass już nie jest potrzebny - select="0" dla Part 1/2 załatwia sprawę
+                chosen_label, filtered_items = self._auto_quality_dialog_and_filter(title, items)
             else:
                 try:
                     control.infoDialog(
@@ -2776,7 +3148,6 @@ class sources:
                         for prop in ('FanVodPL.autoplay','FanVodPL.autoplay_free','FanVodPL.autoplay_premium','FanVodPL.forceResolve','FanVodPL.pendingPlay','FanVodPL.resolve_in_progress','FanVodPL.forceCatalogThisSession','FanVodPL.var.return_to_sources_url'):
                             cw.clearProperty(prop)
                         control.execute('Dialog.Close(progressdialog,true)')
-                        control.execute('Dialog.Close(progressdialogbg,true)')
                         control.execute('Dialog.Close(busydialog,true)')
                         control.execute('Dialog.Close(busydialognocancel,true)')
                         control.execute('Dialog.Close(notification,true)')
@@ -3200,10 +3571,10 @@ class sources:
                 if any(_prem_flags):
                     _prem_only = all(_prem_flags)
                     if _prem_only:
-                        items = self._apply_size_limits(items)
+                        items = self._apply_size_limits_with_fallback(items)
                     else:
                         _prem_items = [it for it in items if self._is_premium_provider(it)]
-                        _prem_ok = self._apply_size_limits(_prem_items) if _prem_items else _prem_items
+                        _prem_ok = self._apply_size_limits_with_fallback(_prem_items) if _prem_items else _prem_items
                         _prem_ok_keys = set(((it.get('url') or ''), (it.get('provider') or '')) for it in _prem_ok)
                         _merged = []
                         for it in items:
@@ -4175,6 +4546,7 @@ class sources:
             timeout=30,
             progressDialogBG=None,
             sort=None,
+            _part_label='',
         ):
         content = "movie" if tvshowtitle is None else "show"  # czy "episode" ?
         fflog(f'{content=}',1,1)
@@ -4189,10 +4561,76 @@ class sources:
         if control.player.isPlayingVideo():
             control.player.pause()
 
-        # ---------------------------------------------------------------
-        # NOWY DIALOG WYSZUKIWANIA (SearchSourcesDialog)
-        # zastępuje standardowy progressDialog bardziej czytelnym oknem
-        # ---------------------------------------------------------------
+        # ── KROK 1: Wybór hostów premium/darmowych ───────────────────────
+        _hs_selected_providers = None
+        _hs_include_free = True
+        try:
+            from ptw.libraries.search_dialog import _PREM_PROVIDERS as _HS_PREM, _PREM_LABELS as _HS_LABELS
+
+            def _hs_has_credentials(p):
+                for suffix_u in ('username', 'login', 'email', 'user', 'apikey', 'api_key', 'token'):
+                    u = control.setting(p + '.' + suffix_u) or ''
+                    if u.strip():
+                        return True
+                return False
+
+            _hs_active = [p for p in _HS_PREM
+                          if control.setting('provider.' + p) not in ('false', '0', '')
+                          and _hs_has_credentials(p)]
+            fflog(f'[HostSelect] aktywne premium z credentialami: {_hs_active}', 0, 1)
+
+            if _hs_active:
+                _hs_state = {p: False for p in _hs_active}
+                _hs_free  = False
+
+                while True:
+                    _sel_names = [_HS_LABELS.get(p, p.upper()) for p in _hs_active if _hs_state[p]]
+                    if _hs_free:
+                        _sel_names.append('Darmowe')
+                    _summary = ('>> WYBRANO: ' + ', '.join(_sel_names) + ' <<') if _sel_names else '>> (nic nie wybrano) <<'
+
+                    items = [_summary, '---']
+                    for p in _hs_active:
+                        _lbl = _HS_LABELS.get(p, p.upper())
+                        if _hs_state[p]:
+                            items.append('(X)  ' + _lbl + '  << WYBRANO >>')
+                        else:
+                            items.append('( )  ' + _lbl)
+                    if _hs_free:
+                        items.append('(X)  Darmowe  << WYBRANO >>')
+                    else:
+                        items.append('( )  Darmowe')
+                    items += ['---', '>>>  SZUKAJ  <<<', 'Anuluj']
+
+                    IDX_PROV0  = 2
+                    IDX_FREE   = IDX_PROV0 + len(_hs_active)
+                    IDX_SEARCH = IDX_FREE + 2
+                    IDX_CANCEL = IDX_FREE + 3
+
+                    _hs_dlg_title = (localtvshowtitle or localtitle or title or '').strip()
+                    _hs_part_info = ('  [' + _part_label + ']') if _part_label else ''
+                    chosen = xbmcgui.Dialog().select(
+                        'Wybierz hosty' + _hs_part_info + '  |  ' + _hs_dlg_title, items)
+
+                    if chosen < 0 or chosen == IDX_CANCEL:
+                        return self.sources
+                    if chosen == IDX_SEARCH:
+                        break
+                    if chosen in (0, 1, IDX_FREE + 1):
+                        continue
+                    if chosen == IDX_FREE:
+                        _hs_free = not _hs_free
+                    elif IDX_PROV0 <= chosen < IDX_FREE:
+                        prov = _hs_active[chosen - IDX_PROV0]
+                        _hs_state[prov] = not _hs_state[prov]
+
+                _hs_selected_providers = {p for p, sel in _hs_state.items() if sel}
+                _hs_include_free = _hs_free
+                fflog(f'[HostSelect] premium={_hs_selected_providers} free={_hs_include_free}', 0, 1)
+        except Exception:
+            fflog_exc(1)
+
+        # ── KROK 2: Dialog postępu ────────────────────────────────────────
         try:
             from ptw.libraries.search_dialog import create_search_dialog, _best_quality as _bq
             _dlg_title = (localtvshowtitle or localtitle or title or '').strip()
@@ -4204,8 +4642,6 @@ class sources:
             if duration:
                 try:
                     _dur_sec = int(duration)
-                    # duration w Kodi może być w minutach LUB sekundach
-                    # jeśli > 300 zakładamy sekundy i przeliczamy
                     _dur_min = _dur_sec // 60 if _dur_sec > 300 else _dur_sec
                     _dlg_meta += ('  |  ' if _dlg_meta else '') + '%d min' % _dur_min
                 except Exception:
@@ -4218,10 +4654,9 @@ class sources:
                 pass
             searchDialog = create_search_dialog(
                 title=_dlg_title, meta=_dlg_meta,
-                poster=poster or '',
-                rating=_dlg_rating,
+                poster=poster or '', rating=_dlg_rating,
             )
-            progressDialog = searchDialog          # alias – nie zmienia reszty kodu
+            progressDialog = searchDialog
             _search_dialog_active = True
         except Exception:
             fflog_exc(1)
@@ -4247,13 +4682,16 @@ class sources:
             if not _search_dialog_active:
                 return
             try:
-                # Liczymy bezpośrednio z self.sources (bez filtrów qmax/qmin)
-                # HD/4K = źródła z jakością 4K, 1440p, 1080p, 1080i
-                # SD/720p = źródła z jakością 720p, HD, SD i pozostałe
-                _hd_q  = {'4K', '1440p', '1080p', '1080i'}
-                _sd_q  = {'720p', 'HD', 'SD'}
-                _hd_n  = sum(1 for e in self.sources if e.get('quality', '') in _hd_q and not e.get('debridonly'))
-                _sd_n  = sum(1 for e in self.sources if e.get('quality', '') not in _hd_q and not e.get('debridonly'))
+                # RC-8: jeden skan zamiast 2 osobnych sum()
+                _hd_q = {'4K', '1440p', '1080p', '1080i'}
+                _hd_n = _sd_n = 0
+                for e in self.sources:
+                    if e.get('debridonly'):
+                        continue
+                    if e.get('quality', '') in _hd_q:
+                        _hd_n += 1
+                    else:
+                        _sd_n += 1
                 searchDialog.update_sources(
                     premium_total=_hd_n,
                     free_total=_sd_n,
@@ -4264,7 +4702,7 @@ class sources:
 
         self.prepareSources()  # prepare database
 
-        control.sleep(1200)  # czas na wycofanie się użytkownika z wyszukiwania źródeł
+        control.sleep(300)   # czas na wycofanie się użytkownika (skrócono 1200→300 ms, RC-1)
 
         try:
             if progressDialog.iscanceled():
@@ -4344,6 +4782,21 @@ class sources:
 
         self.sourceDict = sourceDict
 
+        # ── Filtrowanie sourceDict wg wyboru usera ─────────────────────
+        if _hs_selected_providers is not None:
+            try:
+                _HS_PREM  # sprawdź czy import się udał wcześniej
+            except NameError:
+                from ptw.libraries.search_dialog import _PREM_PROVIDERS as _HS_PREM
+            def _hs_keep(i):
+                name = i[0].lower()
+                is_premium = name in _HS_PREM
+                if is_premium:
+                    return name in _hs_selected_providers
+                else:
+                    return _hs_include_free
+            sourceDict = [i for i in sourceDict if _hs_keep(i)]
+            fflog(f'[HostSelect] premium={_hs_selected_providers} free={_hs_include_free} po filtrze: {len(sourceDict)}', 0, 1)
 
         import threading
 
@@ -4463,7 +4916,13 @@ class sources:
 
         monitor = control.monitor
 
-        for i in range(0, 4 * timeout):
+        _FF_TPS = 10  # RC-5: ticks-per-second (było 2 przy sleep 0.5s, teraz 10 przy 0.1s)
+        _counts_prev = (-1, -1, -1, -1, -1, -1)  # RC-7: cache etykiet
+        # inicjalizacja etykiet (puste – zostaną nadpisane po pierwszym ticku)
+        source_4k_label = source_1440_label = source_1080_label = ""
+        source_720_label = source_sd_label = source_total_label = ""
+
+        for i in range(0, _FF_TPS * 2 * timeout):
 
             if pre_emp:
                 if (
@@ -4479,7 +4938,7 @@ class sources:
                     + d_source_sd
                 ) >= pre_emp_limit:
                     line2 = f'Osiągnięto założony limit źródeł'
-                    percent = int(100 * float(i) / (2 * timeout) + 0.5)
+                    percent = int(100 * float(i) / (_FF_TPS * timeout) + 0.5)
                     _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                     log(f'[getSources] {line2} ({pre_emp_limit})')
                     break
@@ -4495,43 +4954,10 @@ class sources:
                     pass
 
                 if len(self.sources) > 0:
-                    #if quality in ["0"]:
-                    if True:
-                        source_4k = len(
-                            [
-                                e
-                                for e in self.sources
-                                if e["quality"] == "4K" and not e["debridonly"]
-                            ]
-                        ) if qmax == 0 else 0
-                        source_1440 = len(
-                            [
-                                e
-                                for e in self.sources
-                                if e["quality"] in ["1440p"] and not e["debridonly"]
-                            ]
-                        ) if qmax <= 1 and qmin >=1 else 0
-                        source_1080 = len(
-                            [
-                                e
-                                for e in self.sources
-                                if e["quality"] in ["1080p", "1080i"] and not e["debridonly"]
-                            ]
-                        ) if qmax <= 2 and qmin >=2 else 0
-                        source_720 = len(
-                            [
-                                e
-                                for e in self.sources
-                                if e["quality"] in ["720p", "HD"] and not e["debridonly"]
-                            ]
-                        ) if qmax <= 3 and qmin >=3 else 0
-                        source_sd = len(
-                            [
-                                e
-                                for e in self.sources
-                                if e["quality"] == "SD" and not e["debridonly"]
-                            ]
-                        ) if qmax <= 4 and qmin >=4 else 0
+                    # RC-3 fix: jeden skan O(n) zamiast 5 osobnych list-comprehension
+                    (source_4k, source_1440, source_1080,
+                     source_720, source_sd) = _ff_count_sources_once(
+                        self.sources, qmax, qmin)
                     """
                     elif quality in ["1"]:
                         source_1080 = len(
@@ -4735,49 +5161,27 @@ class sources:
                         else total_format % ("lime", d_total)
                     )
 
-                source_4k_label = (
-                    total_format % ("red", source_4k)
-                    if source_4k == 0
-                    else total_format % ("lime", source_4k)
-                )
-                source_1440_label = (
-                    total_format % ("red", source_1440)
-                    if source_1440 == 0
-                    else total_format % ("lime", source_1440)
-                )
-                source_1080_label = (
-                    total_format % ("red", source_1080)
-                    if source_1080 == 0
-                    else total_format % ("lime", source_1080)
-                )
-                source_720_label = (
-                    total_format % ("red", source_720)
-                    if source_720 == 0
-                    else total_format % ("lime", source_720)
-                )
-                source_sd_label = (
-                    total_format % ("red", source_sd)
-                    if source_sd == 0
-                    else total_format % ("lime", source_sd)
-                )
-                source_total_label = (
-                    total_format % ("red", total)
-                    if total == 0
-                    else total_format % ("lime", total)
-                )
+                # RC-7: przebuduj etykiety tylko gdy liczby się zmieniły
+                _counts_now = (source_4k, source_1440, source_1080, source_720, source_sd, total)
+                if _counts_now != _counts_prev:
+                    _counts_prev = _counts_now
+                    source_4k_label = total_format % (("red" if source_4k == 0 else "lime"), source_4k)
+                    source_1440_label = total_format % (("red" if source_1440 == 0 else "lime"), source_1440)
+                    source_1080_label = total_format % (("red" if source_1080 == 0 else "lime"), source_1080)
+                    source_720_label = total_format % (("red" if source_720 == 0 else "lime"), source_720)
+                    source_sd_label = total_format % (("red" if source_sd == 0 else "lime"), source_sd)
+                    source_total_label = total_format % (("red" if total == 0 else "lime"), total)
 
-                if (i / 2) < timeout:
+                if i / _FF_TPS < timeout:
                     try:
+                        # RC-6: jeden skan is_alive zamiast dwóch
+                        _alive = [x for x in threads if x.is_alive()]
                         mainleft = [
                             sourcelabelDict[x.getName()]
-                            for x in threads
-                            if x.is_alive() and x.getName() in mainsourceDict
+                            for x in _alive
+                            if x.getName() in mainsourceDict
                         ]
-                        info = [
-                            sourcelabelDict[x.getName()]
-                            for x in threads
-                            if x.is_alive()
-                        ]
+                        info = [sourcelabelDict[x.getName()] for x in _alive]
                         """ # nie pamiętam po co to
                         if (
                                 # i >= timeout
@@ -4976,7 +5380,7 @@ class sources:
                                 line3 = string3 % (", ".join(info))
                             else:
                                 break
-                            percent = int(100 * float(i) / (2 * timeout) + 0.5)
+                            percent = int(100 * float(i) / (_FF_TPS * timeout) + 0.5)
                             if not progressDialog == control.progressDialogBG:
                                 _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                             else:
@@ -4989,7 +5393,7 @@ class sources:
                             else:
                                 #break
                                 line2 = ""
-                            percent = int(100 * float(i) / (2 * timeout) + 0.5)
+                            percent = int(100 * float(i) / (_FF_TPS * timeout) + 0.5)
                             _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                             if len(info) == 0:
                                 break
@@ -4997,7 +5401,7 @@ class sources:
                         print("Exception Raised: %s" % str(e), log_utils.LOGERROR)
                         log("Exception Raised: %s" % str(e), log_utils.LOGERROR)
                 else:
-                    log(f'[getSources] przerwanie wyszukiwania - przekroczenie ustalonego czasu ({int(i/2)} s.)')
+                    log(f'[getSources] przerwanie wyszukiwania - przekroczenie ustalonego czasu ({int(i / _FF_TPS)} s.)')
                     try:
                         mainleft = [
                             sourcelabelDict[x.getName()]
@@ -5012,7 +5416,7 @@ class sources:
                                 line3 = "Waiting for: %s" % (", ".join(info))
                             else:
                                 break
-                            percent = int(100 * float(i) / (2 * timeout) + 0.5)
+                            percent = int(100 * float(i) / (_FF_TPS * timeout) + 0.5)
                             if not progressDialog == control.progressDialogBG:
                                 _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                             else:
@@ -5025,14 +5429,14 @@ class sources:
                             else:
                                 #break
                                 line2 = 'Przerwanie wyszukiwania - przekroczenie czasu'
-                            percent = int(100 * float(i) / (2 * timeout) + 0.5)
+                            percent = int(100 * float(i) / (_FF_TPS * timeout) + 0.5)
                             _sd_update(max(1, percent)) if _search_dialog_active else progressDialog.update(max(1, percent), info_static)
                             if len(info) == 0:
                                 break
                     except Exception:
                         break
 
-                time.sleep(0.5)  # potrzebne dla pętli for, aby prawidłowo odliczać czas
+                time.sleep(1.0 / _FF_TPS)  # RC-5: 0.1 s/tick, szybkie wykrycie końca wątków
 
             except Exception:
                 pass
@@ -5045,7 +5449,7 @@ class sources:
 
         # próba odzyskania choć części wyników dla wybranych serwisów, gdy minie czas
         # if int(i / 2) >= timeout  or  int(i / 2) > 10:
-        if line2 and int(i / 2) > 20:
+        if line2 and int(i / _FF_TPS) > 20:
             # fflog(f'{s=}')
             ii = [s for s in sourceDict if s[0] in ['tb7', 'xt7'] and s[2]]  # s[2] to sprawdzenie, czy scraper włączony chyba
             # fflog(f'{len(ii)=} {ii=}')
@@ -5856,13 +6260,12 @@ class sources:
         def _ff_part_rank(item):
             """Return rank for PART markers: PART 2 first, then unknown, then PART 1 last."""
             try:
-                s = (item.get("name") or item.get("info") or item.get("url") or "").lower()
+                detected = _ff_detect_part(item).upper()
             except Exception:
-                s = ""
-            # normalize Polish variants too
-            if "part 2" in s or "czesc 2" in s or "część 2" in s:
+                detected = ""
+            if detected.startswith("PART 2"):
                 return 0
-            if "part 1" in s or "czesc 1" in s or "część 1" in s:
+            if detected.startswith("PART 1"):
                 return 2
             return 1
         # --- END PART exception ---
@@ -6213,20 +6616,26 @@ class sources:
         sources_before_filtered_quality = None
 
         # coś z captcha
+        # RC-10b: O(n) single-pass (było: build filtered list + "i not in filtered" O(n²))
         if not captcha == "true":
-            filtered = [i for i in self.sources if i["source"].lower() in self.hostcapDict and "debrid" not in i]
-            self.sources = [i for i in self.sources if i not in filtered]
+            self.sources = [i for i in self.sources if not (i["source"].lower() in self.hostcapDict and "debrid" not in i)]
 
         # coś z domenami, które chyba są z jakiegoś powodu wykluczone
-        filtered = [i for i in self.sources if i["source"].lower() in self.hostblockDict and "debrid" not in i]
-        self.sources = [i for i in self.sources if i not in filtered]
+        # RC-10c: j.w. single-pass O(n)
+        self.sources = [i for i in self.sources if not (i["source"].lower() in self.hostblockDict and "debrid" not in i)]
 
         # chyba angielskie źródła na koniec listy
-        multi = [i["language"] for i in self.sources]
-        multi = [x for y, x in enumerate(multi) if x not in multi[:y]]
-        multi = True if len(multi) > 1 else False
+        # RC-10d: 3 przejścia (O(n)+O(n²)+O(n)) → 1 przejście O(n) z set
+        _langs_seen: set = set()
+        _langs_unique: list = []
+        for _s in self.sources:
+            _l = _s["language"]
+            if _l not in _langs_seen:
+                _langs_seen.add(_l)
+                _langs_unique.append(_l)
+        multi = len(_langs_unique) > 1
         if multi:
-            self.sources = [i for i in self.sources if not i["language"] == "en"] + [i for i in self.sources if i["language"] == "en"]
+            self.sources = [i for i in self.sources if i["language"] != "en"] + [i for i in self.sources if i["language"] == "en"]
 
 
         EXTS = ("avi", "mkv", "mp4", ".ts", "mpg", "mov", "vob", "mts", "2ts")  # dozwolone rozszerzenia filmów ("2ts" to od "m2ts", ale tylko 3 znakowe rozszerzenie do tablicy ze względu na kompatybilność starszego kodu)
@@ -6235,6 +6644,12 @@ class sources:
         remove_verticals_on_list = control.setting("sources.remove_verticals_on_list") == "true"
         fix_for_scroll_long_text_with_second_line = control.setting("fix_for_scroll_long_text_with_second_line") == "true"
         url2 = ""
+
+        # RC-9: cache control.setting() calls które są stałe przez całą pętlę _makeLabel
+        # (każde wywołanie control.setting() to Kodi IPC ~0.3ms; przy 200+ źródłach suma jest odczuwalna)
+        _cfg_api_lang_polish: bool = control.setting("api.language") == "Polish"
+        _cfg_filman_premium: bool = control.setting("filman_api.mark_as_premium") == "true"
+        _cfg_color_cache: dict = {}  # per-provider cache dla dynamicznych settingów kolorów
 
         def _makeLabel(source, offset=None):
             url2 = ""
@@ -6384,7 +6799,7 @@ class sources:
             # s = s.rsplit(".", 1)[0]  # wyrzucenie ostatniego człona domeny (np. ".pl", ".com")  # czy to tylko wizualnie, czy miało to jakiś cel?
 
             if p.lower() == "library":
-                if control.setting("api.language") == "Polish":
+                if _cfg_api_lang_polish:  # RC-9: cached (było control.setting("api.language"))
                     p = "biblioteka"
 
             try:  # f to info (tu może być też rozmiar pliku na końcu)
@@ -6536,17 +6951,25 @@ class sources:
                 or  p.lower() == "ekinotv premium"
                 or  p.lower() == "library"
                 or  p.lower() == "biblioteka"
-                or (p.lower().startswith("filman_api")  if control.setting("filman_api.mark_as_premium") == "true"  else False)
+                or (p.lower().startswith("filman_api")  if _cfg_filman_premium  else False)  # RC-9: cached
             ):
                 p = p.split(" ")[0]
-                clib = control.setting(f"{p.lower()}.library.color.identify")
+                # RC-9: cache per-provider — Kodi IPC zamiast 2×N wywołań robi 2×len(uniq_providers)
+                _pkey = p.lower()
+                if _pkey not in _cfg_color_cache:
+                    _cfg_color_cache[_pkey] = (
+                        control.setting(f"{_pkey}.library.color.identify"),
+                        control.setting(f"{_pkey}.color.identify"),
+                    )
+                _clib_raw, _cp_raw = _cfg_color_cache[_pkey]
+                clib = _clib_raw
                 clib = int(clib) if clib else 10
                 if clib < 10 and source.get("on_account"):
                     color = source_utils.getPremColor(str(clib))
                     source["label"] = f'[COLOR {color}]{label}[/COLOR]'  # wdrożenie LABELa
                 else:
                     prem_identify = source_utils.getPremColor()
-                    cp = control.setting(f"{p.lower()}.color.identify")
+                    cp = _cp_raw  # RC-9: cached (było control.setting(f"{p.lower()}.color.identify"))
                     cp = int(cp) if cp else 10
                     if cp < 10:
                         color = source_utils.getPremColor(str(cp))
