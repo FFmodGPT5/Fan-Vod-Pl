@@ -1515,7 +1515,10 @@ class sources:
                 else:
                     _prem_lang = []
                     for _it in (prem_effective or []):
-                        if _has_lang_tag_in_url(_it):
+                        if _it.get("on_account"):
+                            _prem_lang.append(_it)
+                            fflog(f'[AUTO JAKOŚĆ] 3c lang_tag_floor: BYPASS on_account: {str(_it.get("url",""))[:80]}', 1, 1)
+                        elif _has_lang_tag_in_url(_it):
                             _prem_lang.append(_it)
                         else:
                             fflog(f'[AUTO JAKOŚĆ] 3c lang_tag_floor: odrzucono (brak tagu PL w URL): {str(_it.get("url",""))[:80]}', 1, 1)
@@ -1955,35 +1958,40 @@ class sources:
                         except Exception:
                             _double_ep_note = ""
                         if _double_ep_note:
-                            _dialog_note_parts.append(_double_ep_note)
+                            try:
+                                _dialog_note_parts.extend([_p.strip() for _p in _double_ep_note.split("|") if _p.strip()])
+                            except Exception:
+                                _dialog_note_parts.append(_double_ep_note)
                         if chosen_host_ui_note:
                             _dialog_note_parts.append(chosen_host_ui_note)
                         if ai_flag:
                             _dialog_note_parts.insert(0, "UWAGA: wykryto LEKTORA AI")
-                        _dialog_suffix = ""
-                        if _dialog_note_parts:
-                            _dialog_suffix = " | " + " | ".join(_dialog_note_parts)
-                        heading_best = "Wybierz plik (%d pozycji) — %s%s" % (
+                        heading_best = "Wybierz plik (%d pozycji) — %s" % (
                             len([_p for _p in payloads_best if _p is not None]),
                             (str(chosen_host_name) or "").upper(),
-                            _dialog_suffix
                         )
+                        _dialog_options = list(options_best)
+                        _dialog_payloads = list(payloads_best)
+                        if _dialog_note_parts:
+                            _note_rows = ["[COLOR gold][B]%s[/B][/COLOR]" % _p for _p in _dialog_note_parts]
+                            _dialog_options = _note_rows + ["[COLOR dimgray]────────────────────────[/COLOR]"] + _dialog_options
+                            _dialog_payloads = ([None] * len(_note_rows)) + [None] + _dialog_payloads
                         
                         # Pętla obsługi wyboru (ignoruj kliknięcia na separatory)
                         while True:
-                            idx_best = xbmcgui.Dialog().select(heading_best, options_best)
+                            idx_best = xbmcgui.Dialog().select(heading_best, _dialog_options)
                             if idx_best < 0:
                                 return ("__CANCEL__", None)
-                            if idx_best >= len(payloads_best):
+                            if idx_best >= len(_dialog_payloads):
                                 return ("__CANCEL__", None)
                             
-                            # Sprawdź czy kliknięto separator (None)
-                            if payloads_best[idx_best] is None:
-                                # Ignoruj kliknięcie na separator, pokaż dialog ponownie
+                            # Sprawdź czy kliknięto separator / notatkę
+                            if _dialog_payloads[idx_best] is None:
+                                # Ignoruj kliknięcie, pokaż dialog ponownie
                                 continue
                             
                             # Poprawny wybór
-                            best = payloads_best[idx_best]
+                            best = _dialog_payloads[idx_best]
                             break
                     else:
                         # Jeśli po filtrach nic nie zostało, fallback do najlepszego dostępnego źródła
@@ -2050,13 +2058,7 @@ class sources:
                         options_hosts.append("%s | %s | %s | [%s]" % (prov, q_str, size_str, part_tag))
                         payloads_hosts.append(_it)
                     if options_hosts:
-                        try:
-                            _double_ep_note = str(getattr(self, "_ff_double_ep_ui_note", "") or "").strip()
-                        except Exception:
-                            _double_ep_note = ""
                         _free_heading = "Wybierz darmowy host (%d pozycji) — %s" % (len(options_hosts), title)
-                        if _double_ep_note:
-                            _free_heading = "%s | %s" % (_free_heading, _double_ep_note)
                         idx_host = xbmcgui.Dialog().select(_free_heading, options_hosts)
                     else:
                         idx_host = -1
@@ -2762,7 +2764,7 @@ class sources:
                             _next_season = str(_season_i + 1)
                             fflog(f"[DOUBLE-EP] Nie znaleziono Part 2 w S{_season_i}E{_pair_ep}", 0)
                             try:
-                                setattr(self, "_ff_double_ep_ui_note", "Tylko PART 1 | możliwy PART 2: sezon %s, odc. 1" % _next_season)
+                                setattr(self, "_ff_double_ep_ui_note", "Tylko PART 1 | PART 2: S%sE01" % _next_season)
                             except Exception:
                                 pass
                             try:
@@ -2788,7 +2790,11 @@ class sources:
                         else:
                             fflog("[DOUBLE-EP] Nie znaleziono Part 2, pozostawiam tylko Part 1", 0)
                             try:
-                                setattr(self, "_ff_double_ep_ui_note", "Tylko PART 1")
+                                _ui_note = getattr(self, "_ff_double_ep_ui_note", "") or ""
+                                if "PART 2: S" not in _ui_note:
+                                    _next_season = str(_season_i + 1)
+                                    _ui_note = "Tylko PART 1 | PART 2: S%sE01" % _next_season
+                                setattr(self, "_ff_double_ep_ui_note", _ui_note)
                             except Exception:
                                 pass
                             
@@ -2796,9 +2802,9 @@ class sources:
                             try:
                                 xbmcgui.Dialog().notification(
                                     'Tylko Part 1',
-                                    'Nie znaleziono Part 2. Pokazuję tylko linki z Part 1',
+                                    'Nie znaleziono Part 2. Jeśli to finał sezonu, sprawdź S%sE01' % str(_season_i + 1),
                                     xbmcgui.NOTIFICATION_WARNING,
-                                    4000
+                                    5000
                                 )
                             except Exception:
                                 pass
