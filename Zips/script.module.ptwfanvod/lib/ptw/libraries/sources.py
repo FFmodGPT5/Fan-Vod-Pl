@@ -57,81 +57,121 @@ except Exception:
 # --- END PREMIUM AUTOPLAY GUARD ---
 
 
-
-# --- HARD KILL OF POST-PLAYBACK POPUPS (premium stop/ended) ---
+# --- TARGETED FAILED-PLAYBACK DIALOG BLOCKER (only when armed) ---
 try:
-    import time as _ff_time
-    import xbmc as _ff_xbmc
     import xbmcgui as _ff_xbmcgui
-
-    # Global "silence until" timestamp (list for mutability in closures)
-    _FF_SILENCE_UNTIL = [0.0]
-
-    # Patch Dialog.ok and Dialog.notification: swallow everything during silence window
-    _ff_ok_orig = getattr(_ff_xbmcgui.Dialog, "ok", None)
-    if callable(_ff_ok_orig):
-        def _ff_ok_silenced(self, heading, message, *args, **kwargs):
-            try:
-                if _ff_time.time() < _FF_SILENCE_UNTIL[0]:
-                    return  # swallow any OK dialog inside the window
-            except Exception:
-                pass
-            return _ff_ok_orig(self, heading, message, *args, **kwargs)
-        _ff_xbmcgui.Dialog.ok = _ff_ok_silenced
-
-    _ff_notif_orig = getattr(_ff_xbmcgui.Dialog, "notification", None)
-    if callable(_ff_notif_orig):
-        def _ff_notif_silenced(self, heading, message, *args, **kwargs):
-            try:
-                if _ff_time.time() < _FF_SILENCE_UNTIL[0]:
-                    return  # swallow any notification inside the window
-            except Exception:
-                pass
-            return _ff_notif_orig(self, heading, message, *args, **kwargs)
-        _ff_xbmcgui.Dialog.notification = _ff_notif_silenced
-
-    # Player that opens 3s silence window on seek/stop/end and force-closes dialogs immediately
-    class _FF_SilentPlayer(_ff_xbmc.Player):
-        def _ff_silence(self, secs=3.0):
-            _FF_SILENCE_UNTIL[0] = _ff_time.time() + secs  # 3s global silence
-            try:
-                _ff_xbmc.executebuiltin('Dialog.Close(okdialog)')
-            except Exception:
-                pass
-            try:
-                _ff_xbmc.executebuiltin('Dialog.Close(notification)')
-            except Exception:
-                pass
-            # clear playlist to avoid 'unplayable index -1' chain popups
-            try:
-                pl = _ff_xbmc.PlayList(_ff_xbmc.PLAYLIST_VIDEO)
-                pl.clear()
-            except Exception:
-                pass
-
-        def onPlayBackStopped(self):
-            if not _ff_seek_resume_active():
-                self._ff_silence()
-
-        def onPlayBackEnded(self):
-            if not _ff_seek_resume_active():
-                self._ff_silence()
-
-        def onPlayBackSeek(self, time, seekOffset):
-            return
-
-        def onPlayBackSeekChapter(self, chapter):
-            return
-
-    # Keep a global instance so callbacks stay alive
+    import time as _ff_dialog_time
+    _FF_FAILED_PLAYBACK_PATTERNS = (
+        'nieudane odtwarzanie',
+        'playback failed',
+        'one or more items failed to play',
+        'jeden lub więcej elementów nie powiodło się',
+        'skipping unplayable item',
+    )
+    def _ff_failed_dialog_block_active():
+        try:
+            _raw = xbmcgui.Window(10000).getProperty('FanVodPL.blockFailedPlaybackDialogUntil') or ''
+            return bool(_raw) and float(_raw) > _ff_dialog_time.time()
+        except Exception:
+            return False
+    def _ff_should_block_failed_dialog(*args, **kwargs):
+        if not _ff_failed_dialog_block_active():
+            return False
+        try:
+            _parts = []
+            for _a in args:
+                try:
+                    if _a is not None:
+                        _parts.append(str(_a))
+                except Exception:
+                    pass
+            for _v in kwargs.values():
+                try:
+                    if _v is not None:
+                        _parts.append(str(_v))
+                except Exception:
+                    pass
+            _blob = ' '.join(_parts).strip().lower()
+            if not _blob:
+                return False
+            return any(_pat in _blob for _pat in _FF_FAILED_PLAYBACK_PATTERNS)
+        except Exception:
+            return False
+    def _ff_arm_failed_playback_blocker(ms=12000):
+        try:
+            xbmcgui.Window(10000).setProperty(
+                'FanVodPL.blockFailedPlaybackDialogUntil',
+                str(_ff_dialog_time.time() + max(0.0, float(ms) / 1000.0))
+            )
+        except Exception:
+            pass
+    def _ff_disarm_failed_playback_blocker():
+        try:
+            xbmcgui.Window(10000).clearProperty('FanVodPL.blockFailedPlaybackDialogUntil')
+        except Exception:
+            pass
+    def _ff_watch_close_okdialog(secs=6):
+        """Watchdog: aktywnie zamyka okdialog/confirmationdialog przez executebuiltin.
+        Kodi C++ otwiera 'Nieudane odtwarzanie' poza Python API — monkey-patch nie działa.
+        Ten wątek zamyka dialog zanim user go zobaczy."""
+        import threading as _wt
+        import time as _wtt
+        def _loop():
+            t_end = _wtt.time() + secs
+            while _wtt.time() < t_end:
+                try:
+                    xbmc.executebuiltin('Dialog.Close(okdialog,true)')
+                except Exception:
+                    pass
+                try:
+                    xbmc.executebuiltin('Dialog.Close(confirmationdialog,true)')
+                except Exception:
+                    pass
+                _wtt.sleep(0.10)
+        _wt.Thread(target=_loop, daemon=True).start()
     try:
-        _FF__silent_player_instance
+        _FF_ORIG_DIALOG_OK
     except NameError:
-        _FF__silent_player_instance = _FF_SilentPlayer()
+        _FF_ORIG_DIALOG_OK = _ff_xbmcgui.Dialog.ok
+    try:
+        _FF_ORIG_DIALOG_NOTIFICATION
+    except NameError:
+        _FF_ORIG_DIALOG_NOTIFICATION = _ff_xbmcgui.Dialog.notification
+    def _ff_blocking_dialog_ok(self, *args, **kwargs):
+        # blokuj ZAWSZE gdy treść pasuje do wzorca — niezależnie od flagi arm
+        try:
+            _parts = []
+            for _a in args:
+                try:
+                    if _a is not None:
+                        _parts.append(str(_a))
+                except Exception:
+                    pass
+            for _v in kwargs.values():
+                try:
+                    if _v is not None:
+                        _parts.append(str(_v))
+                except Exception:
+                    pass
+            _blob = ' '.join(_parts).strip().lower()
+            if _blob and any(_pat in _blob for _pat in _FF_FAILED_PLAYBACK_PATTERNS):
+                fflog('[FAILED-PLAYBACK BLOCKER] blocked Dialog.ok (permanent)', 1, 1)
+                return None
+        except Exception:
+            pass
+        return _FF_ORIG_DIALOG_OK(self, *args, **kwargs)
+    def _ff_blocking_dialog_notification(self, *args, **kwargs):
+        if _ff_should_block_failed_dialog(*args, **kwargs):
+            fflog('[FAILED-PLAYBACK BLOCKER] blocked Dialog.notification', 1, 1)
+            return None
+        return _FF_ORIG_DIALOG_NOTIFICATION(self, *args, **kwargs)
+    if getattr(_ff_xbmcgui.Dialog.ok, '__name__', '') != '_ff_blocking_dialog_ok':
+        _ff_xbmcgui.Dialog.ok = _ff_blocking_dialog_ok
+    if getattr(_ff_xbmcgui.Dialog.notification, '__name__', '') != '_ff_blocking_dialog_notification':
+        _ff_xbmcgui.Dialog.notification = _ff_blocking_dialog_notification
 except Exception:
     pass
-# --- END HARD KILL OF POST-PLAYBACK POPUPS ---
-
+# --- END TARGETED FAILED-PLAYBACK DIALOG BLOCKER ---
 
 def _ff_safe_close_ui():
     try:
@@ -152,6 +192,127 @@ def _ff_safe_close_ui():
         except Exception:
             pass
         control.sleep(100)
+
+
+def _ff_choose_playback_mode(item=None, allow_preview=True):
+    if not allow_preview:
+        return "play"
+    try:
+        title = "tryb odtwarzania"
+        options = [
+            "Odtwórz normalnie",
+            "Podgląd 5 min (bez postępu)",
+        ]
+        choice = control.selectDialog(options, title)
+        if choice == -1:
+            return "cancel"
+        return "preview" if choice == 1 else "play"
+    except Exception:
+        return "play"
+
+
+def _ff_preview_cleanup():
+    try:
+        xbmcgui.Window(10000).clearProperty('FanVodPL.preview_mode')
+    except Exception:
+        pass
+    try:
+        xbmc.executebuiltin('Dialog.Close(notification,true)')
+    except Exception:
+        pass
+
+
+def _ff_run_preview_5min(url, title='', meta=None, subs=None):
+    """Lekki podgląd 5-minutowy: omija player().run, żeby nie wpadać w logikę resume/watched dodatku."""
+    try:
+        if not url:
+            return False
+        preview_seconds = 300
+        win = xbmcgui.Window(10000)
+        win.setProperty('FanVodPL.preview_mode', 'true')
+        try:
+            control.infoDialog('Podgląd 5 minut — bez zapisu postępu', icon='INFO', sound=False)
+        except Exception:
+            pass
+
+        label = title or (meta or {}).get('title') or 'Preview'
+        li = xbmcgui.ListItem(label=label, path=str(url if not isinstance(url, tuple) else url[0]))
+        try:
+            li.setProperty('IsPlayable', 'true')
+        except Exception:
+            pass
+        try:
+            li.setProperty('FanVodPLPreview', 'true')
+        except Exception:
+            pass
+        try:
+            art = {}
+            if isinstance(meta, dict):
+                art = {k: v for k, v in {
+                    'thumb': meta.get('thumb') or meta.get('poster'),
+                    'poster': meta.get('poster') or meta.get('thumb'),
+                    'fanart': meta.get('fanart'),
+                    'icon': meta.get('icon') or meta.get('thumb') or meta.get('poster'),
+                }.items() if v}
+            if art:
+                li.setArt(art)
+        except Exception:
+            pass
+        try:
+            if subs:
+                if isinstance(subs, (list, tuple)):
+                    li.setSubtitles([s for s in subs if s])
+                elif isinstance(subs, str):
+                    li.setSubtitles([subs])
+        except Exception:
+            pass
+
+        player_obj = xbmc.Player()
+        player_obj.play(item=str(url if not isinstance(url, tuple) else url[0]), listitem=li)
+
+        def _stop_preview_after_timeout():
+            started = False
+            deadline = time.time() + 45
+            while time.time() < deadline:
+                try:
+                    if player_obj.isPlaying():
+                        started = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.25)
+            if not started:
+                _ff_preview_cleanup()
+                return
+            end_at = time.time() + preview_seconds
+            while time.time() < end_at:
+                try:
+                    if not player_obj.isPlaying():
+                        _ff_preview_cleanup()
+                        return
+                except Exception:
+                    _ff_preview_cleanup()
+                    return
+                time.sleep(0.5)
+            try:
+                if player_obj.isPlaying():
+                    player_obj.stop()
+            except Exception:
+                pass
+            _ff_preview_cleanup()
+
+        try:
+            import threading as _ff_threading
+            _ff_threading.Thread(target=_stop_preview_after_timeout, daemon=True).start()
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        fflog(f'[PREVIEW_5MIN] failed: {e}', 1, 1)
+        _ff_preview_cleanup()
+        return False
+
+
 import json
 import random
 import re
@@ -194,6 +355,369 @@ except Exception as e:
 # Helper for 'ai' exception and precompiled patterns for additional screening.
 import re as _re  # alias to avoid shadowing elsewhere if re is already imported
 
+# ===========================================================================
+# --- MULTI FRENCH DETECTOR – heurystyczny scorer + filtr statyczny ---
+# Nie wymaga AI, nie kosztuje tokenów hostów, działa offline.
+# ===========================================================================
+
+def _ff_wytnij_czesc_techniczna(nazwa):
+    """
+    Wycina część techniczną nazwy pliku — od pierwszego tagu jakości/formatu.
+    Np: 'Psych.S01E05.Woman.Seeking.Dead.MULTi.1080p.NF.WEB-DL-Ralf.mp4'
+        → 'MULTi.1080p.NF.WEB-DL-Ralf.mp4'
+    Jeśli nie znajdzie żadnego tagu — zwraca całą nazwę (fallback).
+    """
+    # Tagi które jednoznacznie zaczynają część techniczną
+    _TECH_START = _re.compile(
+        r'(?<![a-z0-9])('
+        r'multi|1080p?|720p?|2160p?|4k|uhd|hd|sd'
+        r'|bluray|blu-ray|bdrip|webrip|web-dl|webdl|hdrip|dvdrip'
+        r'|nf|amzn|atvp|dsnp|hmax|hulu'
+        r'|x264|x265|h264|h265|hevc|avc'
+        r'|aac|ac3|ddp|dts|truehd|atmos|dd5'
+        r')(?![a-z0-9])',
+        _re.I
+    )
+    m = _TECH_START.search(nazwa)
+    if m:
+        return nazwa[m.start():]
+    return nazwa
+
+
+def _ff_ocen_ryzyko_multi_fr(item):
+    """
+    Analizuje TYLKO część techniczną nazwy pliku (od pierwszego tagu jakości).
+    Dzięki temu słowa z tytułu odcinka/filmu nie wpływają na wynik.
+    Zwraca: (ryzyko: int 0-100, powody: list[str])
+    """
+    # Zbierz surową nazwę
+    nazwa_raw = " ".join([
+        str(item.get("label",     "") or ""),
+        str(item.get("info",      "") or ""),
+        str(item.get("extrainfo", "") or ""),
+        str(item.get("url",       "") or "").split("?")[0].split("/")[-1][:200],
+        str(item.get("language",  "") or ""),
+    ]).strip()
+
+    # Wytnij część techniczną — analizuj tylko ją
+    nazwa = _ff_wytnij_czesc_techniczna(nazwa_raw)
+    nazwa_lower = nazwa.lower()
+    ryzyko = 0
+    powody = []
+
+    if "multi" not in nazwa_lower:
+        return 0, ["Brak tagu MULTI w części technicznej"]
+
+    # Polskie tagi → bezpieczny
+    if _re.search(r'(?<![a-z0-9])(pl|lektor|dubbingpl|subpl|pol|polski|dubbing|pllek|pldub|en|eng|english)(?![a-z0-9])', nazwa_lower):
+        return 0, ["MULTI z PL/EN tagiem – bezpieczny"]
+
+    ryzyko += 50
+    powody.append("MULTI bez dopisku PL/Lektor (+50%)")
+
+    # Izoluj nazwę grupy po ostatnim myślniku w części technicznej
+    grupa = ""
+    czesci = nazwa.split("-")
+    if len(czesci) > 1:
+        grupa = _re.sub(r'\.(mkv|mp4|avi)$', '', czesci[-1].strip(), flags=_re.I).lower()
+        powody.append(f"Grupa: '{grupa}'")
+
+    if grupa:
+        # Znane polskie grupy — przepuść bez doliczania punktów
+        _FF_ZNANE_PL_GRUPY = {
+            'ralf', 'pthd', 'ptm', 'zbyszek', 'dred', 'izyk',
+            'nitro', 'foxhd', 'slay3r', 'gf', 'pl', 'mkv',
+        }
+        if grupa in _FF_ZNANE_PL_GRUPY:
+            powody.append(f"Znana polska grupa '{grupa}' – bezpieczna")
+            return 0, powody
+
+        # Podejrzane słowa w nazwie grupy
+        podejrzane = ['team', 'crew', 'zone', 'hdlight', 'mux', 'fous', 'gks', 'board', 'gz']
+        znalezione = [s for s in podejrzane if s in grupa]
+        if znalezione:
+            ryzyko += 25
+            powody.append(f"Podejrzane słowa w grupie: {znalezione} (+25%)")
+
+        # Długa nieznana nazwa grupy
+        if len(grupa) > 10:
+            ryzyko += 15
+            powody.append("Długa nieznana nazwa grupy (+15%)")
+
+        # Bardzo krótka nieznana nazwa (1-3 znaki) — podejrzana
+        if 0 < len(grupa) <= 3 and grupa not in _FF_ZNANE_PL_GRUPY:
+            ryzyko += 10
+            powody.append(f"Bardzo krótka nieznana nazwa grupy '{grupa}' (+10%)")
+
+    # Bezpośrednie tagi FR w części technicznej
+    if _re.search(
+        r'(?<![a-z0-9])(vff|vfi|vfq|vostfr|truefrench|french|fra|fre|vf|vost|hdlight|multi[5-9]'
+        r'|de|ger|german|deutsch|cz|cze|czech|sk|slo|slovak|hu|hun|hungarian'
+        r'|ru|rus|russian|ro|rum|romanian|it|ita|italian|es|esp|spa|spanish'
+        r'|pt|por|portuguese|nl|dut|dutch|tr|tur|turkish|ua|ukr|bg|bul)(?![a-z0-9])', nazwa_lower):
+        ryzyko += 80
+        powody.append("Tag obcego języka wykryty (+80%)")
+
+    return min(100, ryzyko), powody
+
+
+_FF_MULTI_FR_RISK_THRESHOLD = 75
+
+_FF_RX_MULTI_PL_SIGNAL = _re.compile(
+    r'(?<![a-z0-9])(pl|polish|polski|pl[\s._+/\\-]+en|en[\s._+/\\-]+pl'
+    r'|pl\s*\+\s*en|pl\s*/\s*en|pllek|pldub|pl[\s._-]lek|pl[\s._-]dub'
+    r'|lektor|dubbing|napisy'
+    r'|en|eng|english)(?![a-z0-9])',
+    _re.I
+)
+_FF_RX_MULTI_FR_STRONG = _re.compile(
+    r'(?<![a-z0-9])(' 
+    # Francuski
+    r'fr|fra|fre|french|francais'
+    r'|vff|vfq|vfqf|vf2|vfhd|vfhdrip|vfweb|vfwebrip|vfbluray'
+    r'|truefrench|frenchaudio|dubbedfr|frenchdub|frdub'
+    r'|vostfr|vostfrrip|tfa|subforcedfr|hdlight|multi[5-9]'
+    # Niemiecki
+    r'|de|ger|german|deutsch'
+    # Czeski
+    r'|cz|cze|czech'
+    # Słowacki
+    r'|sk|slo|slovak'
+    # Węgierski
+    r'|hu|hun|hungarian'
+    # Rosyjski
+    r'|ru|rus|russian'
+    # Rumuński
+    r'|ro|rum|romanian'
+    # Włoski
+    r'|it|ita|italian'
+    # Hiszpański
+    r'|es|esp|spa|spanish'
+    # Portugalski
+    r'|pt|por|portuguese'
+    # Niderlandzki
+    r'|nl|dut|dutch|nld'
+    # Turecki
+    r'|tr|tur|turkish'
+    # Ukraiński
+    r'|ua|ukr|ukrainian'
+    # Bułgarski
+    r'|bg|bul|bulgarian'
+    r')(?![a-z0-9])',
+    _re.I
+)
+
+
+def _ff_multi_should_block(item):
+    """
+    True  = blokuj MULTI
+    False = przepuść
+
+    Akceptuje TYLKO pliki Multi z audio PL i/lub EN.
+    Kolejność:
+    1. Sygnał PL lub EN  -> przepuść
+    2. Sygnał obcego języka (FR/DE/CZ/HU/RU/IT/ES/PT...) -> blokuj
+    3. Scorer heurystyczny -> blokuj jeśli ryzyko >= progu
+    4. Brak sygnału -> przepuść (bezpieczny fallback)
+    """
+    txt = " ".join([
+        str(item.get("label",     "") or ""),
+        str(item.get("info",      "") or ""),
+        str(item.get("extrainfo", "") or ""),
+        str(item.get("url",       "") or "").split("?")[0].split("/")[-1][:200],
+        str(item.get("language",  "") or ""),
+    ]).lower()
+
+    # Obce języki mają PRIORYTET – nawet jeśli jest też PL
+    if _FF_RX_MULTI_FR_STRONG.search(txt):
+        return True
+
+    if _FF_RX_MULTI_PL_SIGNAL.search(txt):
+        return False
+
+    ryzyko, powody = _ff_ocen_ryzyko_multi_fr(item)
+    if ryzyko >= _FF_MULTI_FR_RISK_THRESHOLD:
+        try:
+            fflog(f'[MULTI-FR] blokada scorer ryzyko={ryzyko}% powody={powody}', 0)
+        except Exception:
+            pass
+        return True
+
+    return False
+
+# ===========================================================================
+# --- END MULTI FRENCH DETECTOR ---
+# ===========================================================================
+
+# ===========================================================================
+# --- URL AUDIO CACHE FILTER – blokuje konkretne linki z obcym audio ---
+# ===========================================================================
+
+def _ff_url_key(src_item):
+    """Zwraca klucz cache: MD5 oryginalnego URL zrodla (32 znaki)."""
+    try:
+        import hashlib as _hl
+        url = str(src_item.get('url', '') or '').split('?')[0].split('|')[0].strip()
+        if not url:
+            return None
+        return _hl.md5(url.encode('utf-8', errors='replace')).hexdigest()
+    except Exception:
+        return None
+
+
+
+
+def _ff_fingerprint_key(src_item):
+    """
+    Fingerprint techniczny pliku: MULTI + platforma + grupa release.
+    Ten sam plik na roznych hostach da ten sam fingerprint.
+    Przyklad: 'Smoke.S01E09.MULTI.1080p.ATVP.WEB-DL-Ralf'
+              → fingerprint = 'multi|atvp|webdl|ralf'
+              → MD5(fingerprint)
+    """
+    try:
+        import hashlib as _hl2
+        import re as _re_fp
+
+        # Zbierz tekst z label i url
+        raw = ' '.join([
+            str(src_item.get('label',     '') or ''),
+            str(src_item.get('info',      '') or ''),
+            str(src_item.get('extrainfo', '') or ''),
+            str(src_item.get('url',       '') or '').split('?')[0].split('/')[-1][:200],
+        ]).strip()
+
+        if not raw:
+            return None
+
+        # Wytnij część techniczną (od pierwszego tagu jakości/formatu)
+        tech = _ff_wytnij_czesc_techniczna(raw).lower()
+
+        tokens = _re_fp.split(r'[.\-_ ]+', tech)
+
+        # Zbierz istotne tokeny
+        fp_parts = []
+
+        # 1. MULTI (wymagany – bez niego nie ma sensu fingerprint)
+        if not any(t in ('multi', 'mul') for t in tokens):
+            return None
+        fp_parts.append('multi')
+
+        # 2. Platforma streamingowa
+        _PLATFORMS = {
+            'nf': 'nf', 'netflix': 'nf',
+            'amzn': 'amzn', 'amazon': 'amzn',
+            'atvp': 'atvp', 'atpv': 'atvp', 'appletv': 'atvp',
+            'dsnp': 'dsnp', 'disney': 'dsnp',
+            'hmax': 'hmax', 'hbo': 'hmax',
+            'hulu': 'hulu',
+            'pcok': 'pcok',
+            'sky': 'sky',
+            'tvp': 'tvp', 'polsat': 'polsat', 'tvn': 'tvn',
+        }
+        for t in tokens:
+            if t in _PLATFORMS:
+                fp_parts.append(_PLATFORMS[t])
+                break
+
+        # 3. Rozdzielczość
+        for t in tokens:
+            if t in ('2160p', '4k', 'uhd', '1080p', '720p', '480p'):
+                fp_parts.append(t)
+                break
+
+        # 4. Grupa release (ostatni token po myślniku, alfanumeryczny 2-15 znaków)
+        # Szukamy w oryginalnym raw (nie w tech) żeby mieć wielkość liter
+        raw_parts = _re_fp.split(r'[._ ]+', raw)
+        for part in reversed(raw_parts):
+            sub = part.split('-')
+            if len(sub) > 1:
+                grp = sub[-1].strip().lower()
+                grp = _re_fp.sub(r'\.(mkv|mp4|avi)$', '', grp)
+                if 2 <= len(grp) <= 15 and _re_fp.match(r'^[a-z0-9]+$', grp):
+                    fp_parts.append(grp)
+                    break
+
+        if len(fp_parts) < 2:
+            return None  # Za mało danych – nie twórz fingerprinta
+
+        fingerprint = '|'.join(fp_parts)
+        key = 'fp:' + _hl2.md5(fingerprint.encode('utf-8')).hexdigest()
+        return key
+
+    except Exception:
+        return None
+
+def _ff_set_source_url_prop(src_item):
+    """Przekazuje URL, fingerprint i jakosc zrodla do player.py przez window property."""
+    try:
+        import xbmcgui as _xgui_su
+        src_url = str(src_item.get('url', '') or '')
+        _xgui_su.Window(10000).setProperty('FanVodPL.source_orig_url', src_url)
+        fp_key = _ff_fingerprint_key(src_item) or ''
+        _xgui_su.Window(10000).setProperty('FanVodPL.source_fp_key', fp_key)
+        src_quality = str(src_item.get('quality', '') or '')
+        _xgui_su.Window(10000).setProperty('FanVodPL.source_quality', src_quality)
+        try:
+            # ZMIANA (2026-04) [PATCH]: player.py moze odswiezyc stary link tylko gdy ma pelny source item.
+            # POWOD: action=play czesto nie przekazuje parametru source w sys.argv[2].
+            # NIE ZMIENIAC: przechowujemy tylko serializowalna kopie JSON jako best-effort.
+            src_item_json = json.dumps(src_item or {}, ensure_ascii=False, default=str)
+            _xgui_su.Window(10000).setProperty('FanVodPL.source_item_json', src_item_json)
+        except Exception:
+            _xgui_su.Window(10000).setProperty('FanVodPL.source_item_json', '')
+        fflog(f'[URL_CACHE] window prop url={src_url[:80]!r} fp={fp_key!r} quality={src_quality!r}', 1)
+    except Exception:
+        pass
+
+
+def _ff_url_audio_is_blocked(src_item):
+    """
+    Sprawdza cache po dwoch kluczach:
+    1. MD5(url) – konkretny link
+    2. MD5(fingerprint) – ten sam plik na innych hostach
+
+    Blokujace werdykty: foreign (obce audio), dead (niegralny link),
+    lowres (zadeklarowana jakosc istotnie wyzsza od faktycznej).
+    """
+    try:
+        from ptw.libraries import bookmarks as _bm_uc
+        # Klucz 1: URL
+        key_url = _ff_url_key(src_item)
+        _v_url = _bm_uc.group_cache_lookup(key_url) if key_url else None
+        if _v_url in ('foreign', 'dead', 'lowres'):
+            fflog(f'[URL_CACHE] blokada URL ({_v_url}): {str(src_item.get("url",""))[:60]!r}', 1)
+            return True
+        # Klucz 2: fingerprint (ten sam plik na innym hoscie)
+        key_fp = _ff_fingerprint_key(src_item)
+        if key_fp:
+            _v_fp = _bm_uc.group_cache_lookup(key_fp)
+            if _v_fp in ('foreign', 'dead', 'lowres'):
+                fflog(f'[URL_CACHE] blokada FINGERPRINT ({_v_fp}): fp={key_fp!r} url={str(src_item.get("url",""))[:60]!r}', 1)
+                return True
+    except Exception:
+        pass
+    return False
+
+# ===========================================================================
+# --- END URL AUDIO CACHE FILTER ---
+
+def _ff_host_speed_rank(src_item):
+    """
+    Zwraca priorytet szybkosci hosta: 0=szybki, 1=nieznany, 2=wolny.
+    Uzywane jako ostatnie kryterium sortowania – nie przebija jakosci ani jezyka.
+    """
+    try:
+        from ptw.libraries import bookmarks as _bm_spd
+        host = str(src_item.get('source', '') or '').strip().lower()
+        quality = str(src_item.get('quality', '') or '').strip()
+        return _bm_spd.host_speed_lookup(host, quality)
+    except Exception:
+        return 1  # nieznany = srodek
+
+# ===========================================================================
+
+
 # --- FORCE AUTOPLAY SAFETY SWITCH (działa nawet po „czystej” instalacji) ---
 try:
     import xbmcaddon
@@ -209,13 +733,18 @@ try:
     _force_setting('cm.enable.autoplay', True)                 # autoodtwarzanie (menu kontekstowe)
     _force_setting('auto.select.next.item.to.play', True)      # próbuj kolejne linki
     _force_setting('hosts.mode', '2')                          # 2 = AUTOPLAY (zgodnie z Twoją logiką)
+    # ZMIANA (2026-04) [PATCH]: force-setting hosts.mode='2' przy starcie
+    # POWOD: setSetting() zapisuje na dysk, ale stary Addon() instance (np. z control.py)
+    #   ma wlasny cache i zwraca "" na swiezej instalacji — autoplay nie wlaczal sie.
+    # NIE ZMIENIAC: nie zastepowac fresh Addon().getSetting() przez control.setting() —
+    #   control.setting() uzywa starego instance i zwroci pusty string na pierwszym uruchomieniu.
 except Exception:
     pass
 # --- END FORCE AUTOPLAY SAFETY SWITCH ---
 
 
 # --- UI toggle: show/hide the "Odrzucone" pseudo-folder in GUI ---
-SHOW_REJECTED_GUI = False  # False = ukryj; True = pokazuj
+SHOW_REJECTED_GUI = True  # False = ukryj; True = pokazuj
 
 
 
@@ -287,6 +816,11 @@ def _ff_return_to_last_sources(self, title, items, filtered_items, season, episo
         _ap = control.window.getProperty('FanVodPL.autoplay') or ''
         _ap_free = control.window.getProperty('FanVodPL.autoplay_free') or ''
         if _ap != '2' and _ap_free != '2':
+            # ustaw flagę że user właśnie anulował — REJECTED FALLBACK ma ją sprawdzić
+            try:
+                control.window.setProperty('FanVodPL.userJustCancelled', '1')
+            except Exception:
+                pass
             return
     except Exception:
         pass
@@ -366,6 +900,16 @@ def _ff_is_classic_series(release_year, is_episode: bool) -> bool:
         return False
 
 
+def _ff_should_skip_foreign_audio_guard(release_year, is_episode: bool) -> bool:
+    """Wyłącza foreign-audio cache dla starych tytułów.
+    - seriale klasyczne: 1950–2015
+    - filmy legacy: 1950–2005
+    Użytkownik chce, aby te tytuły nie były ani sprawdzane, ani dopisywane
+    do czarnej listy foreign-audio.
+    """
+    return _ff_is_classic_series(release_year, is_episode) or (not is_episode and _ff_is_legacy_decades(release_year))
+
+
 def _ff_has_avi_token(text: str) -> bool:
     t = (text or "")
     return bool(_re.search(r'(?<![a-z0-9])avi(?![a-z0-9])|\.avi\b', t, _re.I))
@@ -382,6 +926,19 @@ def _ff_mask_avi_for_legacy(text: str) -> str:
 # --- LEGACY FULL MASK (tytuły 1950-2005) ---
 # Stare filmy/seriale mają pliki tylko w starych formatach (DVDRip, XviD, AVI, TS itp.)
 # Zastępujemy je neutralnymi tokenami żeby nie były blokowane przez globalną blacklistę.
+_FF_HDTS_VARIANT_RE = _re.compile(
+    r'(?<![a-z0-9])h[\s._-]*d[\s._-]*t[\s._-]*s(?:[\s._-]*rip)?(?![a-z0-9])',
+    _re.I,
+)
+
+
+def _ff_has_hdts_variant(text: str) -> bool:
+    try:
+        return bool(_FF_HDTS_VARIANT_RE.search(str(text or "")))
+    except Exception:
+        return False
+
+
 _FF_LEGACY_MASK_PATTERNS = [
     (_re.compile(r'\bdvdrip\b',   _re.I), 'legacyrip1'),
     (_re.compile(r'\bdvdscr\b',   _re.I), 'legacyscr'),
@@ -394,7 +951,7 @@ _FF_LEGACY_MASK_PATTERNS = [
     # "avi" jest podciągiem w PATTERNS_SUBSTRING — zastępujemy na token bez "avi"
     (_re.compile(r'(?<![a-z0-9])avi(?![a-z0-9])', _re.I), 'legacycontainer1'),
     (_re.compile(r'\.avi\b',      _re.I), '.legacycontainer1'),
-    (_re.compile(r'\bhdts\b',     _re.I), 'legacyformat1'),
+    (_FF_HDTS_VARIANT_RE,               'legacyformat1'),
     (_re.compile(r'\bhdcam\b',    _re.I), 'legacyformat2'),
     (_re.compile(r'\btelesync\b', _re.I), 'legacyformat3'),
     (_re.compile(r'\bvhsrip\b',   _re.I), 'legacyformat4'),
@@ -442,13 +999,35 @@ def _ff_src_has_avi(src: dict) -> bool:
 _FF_DEFAULT_BLOCK = (
     "cam,ts,tc,hdtc,hdts,workprint,wp,preair,screener,tsrip,hdcam,telecine,tele-sync,"
     "camrip,tc-rip,hd-cam,hd-camrip,hd-ts,hd-tc,hdtsrip,telesync,telesyn,telesync-rip,"
+    "hdtv,hdtvrip,hd-tv,pdtv,sdtv,dsrip,"
+    "hqcam,hq-cam,ppvrip,ppv,r5,r6,dvdscr,hdscr,dvdscreener,bdscr,"
+    "hdcamrip,telecinerip,tele-cine,vhsrip,vhs,vodrip,vod-rip,"
+    "rmvb,wmv,flv,3gp,divx,"
+    "hardsub,hardsubs,hardcoded,hs,"
+    "nosound,no sound,no-sound,silentfilm,silent film,"
+    "audiofixed,audio fixed,audio-fixed,ac3dubbed,ac3dub,"
+    "tfa,true french audio,truefrenchaudio,true-french-audio,"
+    ".rent,.rental,rental,"
     "webrip,web-rip,hdrip,bdrip,dvdrip,avi,xvid,lq,low quality,sample only,"
     "vf,vfq,vfqf,vf2,vfweb,vfwebrip,vfbluray,vfhdrip,vfhd,vostfr,vostfrrip,french,fr,fr-ca,fr-be,fr-ch,français,francais,"
     "vost,mic,telesyncmic,line,lineaudio,camaudio,dubbedfr,frenchdub,frenchaudio,frdub,"
     "subforced,fansub,fansubs,subforcedfr,vostfrsub,vostfrsubs,vostfr-sub,vostfr-subs,"
     "xvidstage.com,streamango.com,rapidvideo.com,"
-    "ai,pet,line-audio,line audio,mic-audio,mic audio,cam-audio,cam audio,ts-audio,ts audio,telesync audio,tsmic,ts-mic,line-mic,micline,hall audio,hall-audio,hallaudio,echo audio,echo-audio,echoaudio,rec audio,rec-audio,recaudio,md,m.d,micdub,mic-dub,mic dub,micdublado,mic dublado,dubbed mic,dub mic,dub-mic,line dub,line-dub,linedub,kino audio,kinoaudio,kino-audio,theater audio,theateraudio,theater-audio,truefrench"
+    "ai,pet,line-audio,line audio,mic-audio,mic audio,cam-audio,cam audio,ts-audio,ts audio,telesync audio,tsmic,ts-mic,line-mic,micline,hall audio,hall-audio,hallaudio,echo audio,echo-audio,echoaudio,rec audio,rec-audio,recaudio,md,m.d,micdub,mic-dub,mic dub,micdublado,mic dublado,dubbed mic,dub mic,dub-mic,line dub,line-dub,linedub,kino audio,kinoaudio,kino-audio,theater audio,theateraudio,theater-audio,truefrench,"
+    "higgsboson,higgs-boson,higgs_boson"
 )
+
+# ============================================================
+# WHITELIST TYTUŁÓW — wyjątki w filtrze zakazanych słów
+# ============================================================
+# Tytuły których nazwy release kolidują z _FF_DEFAULT_BLOCK (np. film "Flow" 2024
+# ma często tag "AI" w nazwie który inaczej blokuje filtr AI-lektora).
+# Dokładne dopasowanie (lowercase, == a nie substring) — "Flow" nie ruszy "Overflow" ani "Flowers".
+# Bypass działa TYLKO dla zwykłych zakazanych (nie dla priorytetowych !word z GUI).
+# Pozostałe filtry (foreign audio, lowres, dead, size) działają normalnie.
+_FF_TITLE_WHITELIST_DISALLOWED = {
+    "flow",
+}
 
 # --- PATCH: allow x264/x265 ---
 for _token in ("x264", "x265"):
@@ -488,6 +1067,50 @@ PATTERNS_WHOLE_WORD = [
     _re.compile(r'\bfrancais\b', _re.I),
     _re.compile(r'\bfrançais\b', _re.I),
     _re.compile(r'\bhdts\b', _re.I),
+    _re.compile(r'\bhdtv\b', _re.I),
+    _re.compile(r'\bhdtvrip\b', _re.I),
+    _re.compile(r'\bhd-tv\b', _re.I),
+    _re.compile(r'\bpdtv\b', _re.I),
+    _re.compile(r'\bsdtv\b', _re.I),
+    _re.compile(r'\bdsrip\b', _re.I),
+    # --- złe jakości / audio (nowe filmy) ---
+    _re.compile(r'\bhqcam\b', _re.I),
+    _re.compile(r'\bhq-cam\b', _re.I),
+    _re.compile(r'\bppvrip\b', _re.I),
+    _re.compile(r'\bppv\b', _re.I),
+    _re.compile(r'\br5\b', _re.I),
+    _re.compile(r'\br6\b', _re.I),
+    _re.compile(r'\bdvdscr\b', _re.I),
+    _re.compile(r'\bhdscr\b', _re.I),
+    _re.compile(r'\bdvdscreener\b', _re.I),
+    _re.compile(r'\bbdscr\b', _re.I),
+    _re.compile(r'\bhdcamrip\b', _re.I),
+    _re.compile(r'\btelecinerip\b', _re.I),
+    _re.compile(r'\btele-cine\b', _re.I),
+    _re.compile(r'\bvhsrip\b', _re.I),
+    _re.compile(r'\bvhs\b', _re.I),
+    _re.compile(r'\bvodrip\b', _re.I),
+    _re.compile(r'\bvod-rip\b', _re.I),
+    _re.compile(r'\bnosound\b', _re.I),
+    _re.compile(r'\bno-sound\b', _re.I),
+    _re.compile(r'\bsilentfilm\b', _re.I),
+    _re.compile(r'\baudiofixed\b', _re.I),
+    _re.compile(r'\baudio-fixed\b', _re.I),
+    _re.compile(r'\bac3dubbed\b', _re.I),
+    _re.compile(r'\bac3dub\b', _re.I),
+    # --- francuski TFA / pliki rental ---
+    _re.compile(r'\btfa\b', _re.I),
+    _re.compile(r'\brental\b', _re.I),
+    _re.compile(r'\.rent\b', _re.I),
+    _re.compile(r'\brmvb\b', _re.I),
+    _re.compile(r'\bwmv\b', _re.I),
+    _re.compile(r'\bflv\b', _re.I),
+    _re.compile(r'\b3gp\b', _re.I),
+    _re.compile(r'\bdivx\b', _re.I),
+    _re.compile(r'\bhardsub\b', _re.I),
+    _re.compile(r'\bhardsubs\b', _re.I),
+    _re.compile(r'\bhardcoded\b', _re.I),
+    _re.compile(r'\bhs\b', _re.I),
     _re.compile(r'\bivo\b', _re.I),
     _re.compile(r'\blq\b', _re.I),
     _re.compile(r'\bmixio\b', _re.I),
@@ -547,6 +1170,7 @@ _FF_RX_IMAX = _re.compile(r'(?<![a-z0-9])imax(?![a-z0-9])', _re.I)
 _FF_RX_MAX  = _re.compile(r'(?<![a-z0-9])max(?![a-z0-9])',  _re.I)
 _FF_RX_HQ   = _re.compile(r'(?<![a-z0-9])hq(?![a-z0-9])',   _re.I)
 _FF_RX_LQ   = _re.compile(r'(?<![a-z0-9])lq(?![a-z0-9])',   _re.I)
+_FF_RX_HIGGSBOSON = _re.compile(r'higgs[\-_]?boson', _re.I)
 # --- END PRECOMPILED REGEX ---
 
 # --- AI SZTUCZNY LEKTOR (wykrywanie po labelu/etykiecie) ---
@@ -580,6 +1204,16 @@ AI_LEKTOR_PATTERNS = (
     "pl_expressivo",
     "plexpressivo",
     "plexptessivo",
+
+    # --- TTS / SLiM → syntetyczny lektor AI ---
+    "tts",
+    ".tts.",
+    "-tts-",
+    "_tts_",
+    "slim",
+    ".slim",
+    "-slim",
+    "_slim",
 )
 
 
@@ -601,6 +1235,184 @@ def _has_ai_lektor(item):
         if p in txt:
             return True
     return False
+
+
+_FF_RX_KODI_TAG = _re.compile(r'\[[^\]]+\]')
+_FF_RX_MULTI = _re.compile(r'(?<![a-z0-9])(multi|mul)(?![a-z0-9])|pl\s*\+\s*en|pl\s*/\s*en', _re.I)
+_FF_RX_SUBS = _re.compile(r'(?<![a-z0-9])(napisy|napis|subs?|subtitles?|pl\s*sub|sub\s*pl|plsub|subpl)(?![a-z0-9])', _re.I)
+_FF_RX_LEKTOR = _re.compile(r'(?<![a-z0-9])(lektor|lekt)(?![a-z0-9])', _re.I)
+_FF_RX_DUBBING = _re.compile(r'(?:(?<![a-z0-9])(dubbing|dubbingpl|dubbing-pl|dub|dubpl|dub-pl)(?![a-z0-9])|pldub|pl-dub)', _re.I)
+_FF_RX_PL = _re.compile(r'(?<![a-z0-9])(pl|polish|polski)(?![a-z0-9])', _re.I)
+_FF_RX_SIZE_GB = _re.compile(r'(\d+(?:[\.,]\d+)?)\s*gb', _re.I)
+_FF_RX_SIZE_MB = _re.compile(r'(\d+(?:[\.,]\d+)?)\s*mb', _re.I)
+
+
+def _ff_item_text(item):
+    if not item:
+        return ""
+    return " ".join([
+        str(item.get("label", "")),
+        str(item.get("info", "")),
+        str(item.get("extrainfo", "")),
+        str(item.get("url", "")),
+        str(item.get("language", "")),
+    ]).lower()
+
+
+def _ff_clean_kodi_label(label, max_len=110):
+    try:
+        txt = _FF_RX_KODI_TAG.sub('', str(label or ''))
+        txt = ' '.join(txt.replace('\n', ' ').split())
+    except Exception:
+        txt = str(label or '')
+    if max_len and len(txt) > max_len:
+        return txt[:max_len - 1] + '…'
+    return txt
+def _ff_quality_rank_generic(item):
+    q = str((item or {}).get('quality') or '').upper()
+    if q in ('4K', '2160P'):
+        return 0
+    if q == '1440P':
+        return 1
+    if q in ('1080P', '1080I'):
+        return 2
+    if q in ('HD', '720P'):
+        return 3
+    return 4
+
+
+def _ff_size_gb_generic(item):
+    txt = _ff_item_text(item)
+    try:
+        m = _FF_RX_SIZE_GB.search(txt)
+        if m:
+            return float(m.group(1).replace(',', '.'))
+        m = _FF_RX_SIZE_MB.search(txt)
+        if m:
+            return float(m.group(1).replace(',', '.')) / 1024.0
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _ff_item_is_multi(item):
+    txt = _ff_item_text(item)
+    lang = str((item or {}).get('language') or '').lower()
+    return (_FF_RX_MULTI.search(txt) is not None) or ('multi' in lang) or ('mul' in lang)
+
+
+def _ff_item_is_voice(item):
+    txt = _ff_item_text(item)
+    return _has_ai_lektor(item) or (_FF_RX_LEKTOR.search(txt) is not None) or (_FF_RX_DUBBING.search(txt) is not None)
+
+
+def _ff_item_is_subs_only(item):
+    txt = _ff_item_text(item)
+    if _ff_item_is_multi(item):
+        return False
+    if _ff_item_is_voice(item):
+        return False
+    return _FF_RX_SUBS.search(txt) is not None
+
+
+def _ff_pick_best_item(items, predicate):
+    candidates = []
+    for it in (items or []):
+        try:
+            if predicate(it):
+                candidates.append(it)
+        except Exception:
+            continue
+    if not candidates:
+        return None
+    candidates.sort(key=lambda it: (
+        0 if it.get('on_account') else 1,
+        _ff_quality_rank_generic(it),
+        -_ff_size_gb_generic(it),
+    ))
+    return candidates[0]
+
+
+def _ff_build_link_legend_rows(items):
+    rows = []
+    try:
+        _has_multi = any(_ff_item_is_multi(it) for it in (items or []))
+    except Exception:
+        _has_multi = False
+    try:
+        _has_subs = any(_ff_item_is_subs_only(it) for it in (items or []))
+    except Exception:
+        _has_subs = False
+    try:
+        # _has_voice: tylko pozycje które NIE są MULTI (osobne Lektor/Dubbing)
+        _has_voice = any(
+            _ff_item_is_voice(it) and not _ff_item_is_multi(it)
+            for it in (items or [])
+        )
+    except Exception:
+        _has_voice = False
+
+    if _has_multi or _has_voice or _has_subs:
+        rows.append('[COLOR lightskyblue][B]LEGENDA LINKÓW[/B][/COLOR]')
+    if _has_multi:
+        rows.append('[COLOR white]• [B]PL+EN[/B] = polski + angielski[/COLOR]')
+    if _has_voice:
+        rows.append('[COLOR white]• [B]LEKTOR[/B] / [B]DUBBING[/B] = polski głos[/COLOR]')
+    if _has_subs:
+        rows.append('[COLOR white]• [B]NAPISY[/B] = tylko napisy PL[/COLOR]')
+
+    return rows
+
+
+def _ff_quality_badge_from_label(label):
+    txt = str(label or '').upper()
+    if '4K' in txt or '2160P' in txt:
+        return '[COLOR gold][B]4K[/B][/COLOR]'
+    if '1080P' in txt or '1080I' in txt or 'FULLHD' in txt:
+        return '[COLOR lightgreen][B]FHD[/B][/COLOR]'
+    if '720P' in txt or ' HD ' in (' ' + txt + ' '):
+        return '[COLOR lightskyblue][B]HD[/B][/COLOR]'
+    if 'SD' in txt:
+        return '[COLOR darkorange][B]SD[/B][/COLOR]'
+    return ''
+
+
+def _ff_visual_dialog_label(item, idx=0, top_n=3):
+    raw_label = str((item or {}).get('label') or '')
+    clean = _ff_clean_kodi_label(raw_label, max_len=150)
+    upper = clean.upper()
+
+    badges = []
+    if idx < top_n:
+        badges.append('[COLOR springgreen][B]TOP %d[/B][/COLOR]' % (idx + 1))
+    # PATCH 2026-04-25: linki obecne na koncie mają być widoczne na zielono.
+    _ff_on_account = bool(item.get('on_account'))
+    if _ff_on_account:
+        badges.append('[COLOR springgreen][B]PREMIUM[/B][/COLOR]')
+        clean = '[COLOR springgreen]%s[/COLOR]' % clean
+    else:
+        badges.append('[COLOR silver][B]FREE[/B][/COLOR]')
+
+    q_badge = _ff_quality_badge_from_label(upper)
+    if q_badge:
+        badges.append(q_badge)
+    if 'PL+EN' in upper or 'MULTI' in upper:
+        badges.append('[COLOR white][B]PL+EN[/B][/COLOR]')
+    elif 'LEKTOR' in upper or 'DUBBING' in upper:
+        badges.append('[COLOR white][B]LEKTOR[/B][/COLOR]')
+    elif 'NAPISY' in upper:
+        badges.append('[COLOR white][B]NAPISY[/B][/COLOR]')
+    if 'AI LEKTOR' in upper:
+        badges.append('[COLOR yellow][B]AI[/B][/COLOR]')
+    if 'PART 1' in upper:
+        badges.append('[COLOR orange][B]PART 1[/B][/COLOR]')
+    elif 'PART 2' in upper:
+        badges.append('[COLOR orange][B]PART 2[/B][/COLOR]')
+
+    if badges:
+        return '%s  [COLOR dimgray]•[/COLOR]  %s' % (' '.join(badges), clean)
+    return clean
+
 
 def _has_any(rx_list, text: str) -> bool:
     if not text:
@@ -811,6 +1623,7 @@ class sources:
             "thevideo.me","vidup.me","streamin.to","torba.se","flashx","flashx.tv",
         ]
         # Hosty HQ
+
         self.hosthqDict = [
             "gvideo","vidcloud.co","vidoza.net","vidoza.org","vidlox.tv","verystream.com","estream.to",
             "openload.co","openload.io","oload.tv","oload.stream","mail.ru","mailru","mixdrop.co",
@@ -886,7 +1699,12 @@ class sources:
 
     def _collect_best_multi_pair(self, items):
         try:
-            multi_items = [it for it in (items or []) if (str((it.get("language") or "")).lower() in ("multi", "mul")) and not _has_ai_lektor(it)]
+            multi_items = [
+                it for it in (items or [])
+                if (str((it.get("language") or "")).lower() in ("multi", "mul"))
+                and not _has_ai_lektor(it)
+                and not _ff_multi_should_block(it)
+            ]
             if not multi_items:
                 return []
             # prefer highest resolution available among MULTI
@@ -954,12 +1772,16 @@ class sources:
         return {
             "limit_4k_min": 10,
             "limit_4k_max": 20,
-            "limit_multi_min": 12,
-            "limit_multi_max": 25,
+            "limit_multi_4k_min": 12,
+            "limit_multi_4k_max": 25,
             "limit_fhd_min": 7,
             "limit_fhd_max": 17,
+            "limit_multi_fhd_min": 8,
+            "limit_multi_fhd_max": 18,
             "limit_720_min": 4,
             "limit_720_max": 10,
+            "limit_multi_720_min": 6,
+            "limit_multi_720_max": 12,
             "limit_tv_max": 12,
         }
 
@@ -986,7 +1808,7 @@ class sources:
                 # brak rozmiaru: odrzuć TYLKO premium
                 return not self._is_premium_provider(it)
 
-            # --- MULTI przed rozdzielczością ---
+            res = self._quality_of(it)
             is_multi = ((it.get("language") or "").lower() in ("multi", "mul") or
                         re.search(r'(?<![a-z0-9])multi(?![a-z0-9])',
                                   " ".join([str(it.get("label","")),
@@ -995,9 +1817,15 @@ class sources:
                                             str(it.get("url",""))]), re.I))
 
             if is_multi:
-                mi, ma = limits["limit_multi_min"], limits["limit_multi_max"]
+                if res == "2160p":
+                    mi, ma = limits["limit_multi_4k_min"], limits["limit_multi_4k_max"]
+                elif res == "1080p":
+                    mi, ma = limits["limit_multi_fhd_min"], limits["limit_multi_fhd_max"]
+                elif res == "720p":
+                    mi, ma = limits["limit_multi_720_min"], limits["limit_multi_720_max"]
+                else:
+                    mi, ma = limits["limit_multi_fhd_min"], limits["limit_multi_fhd_max"]  # fallback
             else:
-                res = self._quality_of(it)
                 if res == "2160p":
                     mi, ma = limits["limit_4k_min"], limits["limit_4k_max"]
                 elif res == "1080p":
@@ -1011,20 +1839,6 @@ class sources:
                 return False
             if ma is not None and size > ma:
                 return False
-            return True
-  # brak rozmiaru = nie odrzucaj
-            if res == "2160p":
-                mi, ma = limits["limit_4k_min"], limits["limit_4k_max"]
-            elif res == "1080p":
-                mi, ma = limits["limit_fhd_min"], limits["limit_fhd_max"]
-            elif res == "720p":
-                mi, ma = limits["limit_720_min"], limits["limit_720_max"]
-            elif (it.get("language") or "").lower() in ("multi", "mul"):
-                mi, ma = limits["limit_multi_min"], limits["limit_multi_max"]
-            else:
-                mi, ma = None, None
-            if mi is not None and size < mi: return False
-            if ma is not None and size > ma: return False
             return True
 
         def ok_tv(it):
@@ -1066,6 +1880,7 @@ class sources:
             size = self._extract_size_gb(it)
             if size is None:
                 return not self._is_premium_provider(it)
+            res = self._quality_of(it)
             is_multi = ((it.get("language") or "").lower() in ("multi", "mul") or
                         re.search(r'(?<![a-z0-9])multi(?![a-z0-9])',
                                   " ".join([str(it.get("label", "")),
@@ -1073,9 +1888,15 @@ class sources:
                                             str(it.get("extrainfo", "")),
                                             str(it.get("url", ""))]), re.I))
             if is_multi:
-                mi, ma = FALLBACK_FHD_MIN, limits["limit_multi_max"]
+                if res == "2160p":
+                    mi, ma = FALLBACK_FHD_MIN, limits["limit_multi_4k_max"]
+                elif res == "1080p":
+                    mi, ma = FALLBACK_FHD_MIN, limits["limit_multi_fhd_max"]
+                elif res == "720p":
+                    mi, ma = FALLBACK_720_MIN, limits["limit_multi_720_max"]
+                else:
+                    mi, ma = FALLBACK_FHD_MIN, limits["limit_multi_fhd_max"]  # fallback
             else:
-                res = self._quality_of(it)
                 if res == "2160p":
                     mi, ma = limits["limit_4k_min"], limits["limit_4k_max"]
                 elif res == "1080p":
@@ -1110,7 +1931,7 @@ class sources:
         import xbmcgui, xbmcaddon
         addon = xbmcaddon.Addon()
         choices = ["Serwery źródeł PL"]
-        idx = xbmcgui.Dialog().select("[FF] Ustawienia Auto Jakość", choices)
+        idx = xbmcgui.Dialog().select("Ustawienia — Auto Jakość", choices)
         if idx < 0:
             return False  # nic nie zapisano
         if idx == 0:
@@ -1155,6 +1976,8 @@ class sources:
 
         def _banned(t: str) -> bool:
             t = _ff_prepare_text_for_blocking((t or ""), allow_legacy_avi=_allow_legacy_avi)
+            if _ff_has_hdts_variant(t):
+                return True
             if _whitelisted(t):
                 return False
             # EXCEPTION: IMAX/MAX in safe, disc-quality MULTI contexts (4K/1080p)
@@ -1261,6 +2084,17 @@ class sources:
             # 0) Brak źródeł – nic nie robimy
             items_all = items or []
             if not items_all:
+                try:
+                    xbmcgui.Dialog().ok(
+                        "FanVodPL — brak źródeł",
+                        "Nie znaleziono żadnych źródeł dla tego tytułu.[CR][CR]"
+                        "Możliwe przyczyny:[CR]"
+                        "• serwisy tymczasowo niedostępne[CR]"
+                        "• tytuł niedostępny w polskich serwisach[CR]"
+                        "• problem z połączeniem"
+                    )
+                except Exception:
+                    pass
                 return ("__CANCEL__", None)
 
             # --- SD policy: block SD globally, allow for legacy (<=2005) or classic series (<=2015) ---
@@ -1335,6 +2169,8 @@ class sources:
                 t = _ff_prepare_text_for_blocking((t or ""), allow_legacy_avi=_allow_legacy_avi)
                 if not t.strip():
                     return False
+                if _ff_has_hdts_variant(t):
+                    return True
                 if _whitelisted(t):
                     return False
                 try:
@@ -1514,6 +2350,7 @@ class sources:
                     pass  # bypass: stare filmy (1950-2005) i stare seriale (1950-2015)
                 else:
                     _prem_lang = []
+                    _lang_tag_rejected = []
                     for _it in (prem_effective or []):
                         if _it.get("on_account"):
                             _prem_lang.append(_it)
@@ -1522,7 +2359,17 @@ class sources:
                             _prem_lang.append(_it)
                         else:
                             fflog(f'[AUTO JAKOŚĆ] 3c lang_tag_floor: odrzucono (brak tagu PL w URL): {str(_it.get("url",""))[:80]}', 1, 1)
+                            _lang_tag_rejected.append(_it)
                     prem_effective = _prem_lang
+                    if _lang_tag_rejected:
+                        try:
+                            _existing = json.loads(control.window.getProperty(self.itemRejected)) or []
+                        except Exception:
+                            _existing = []
+                        _seen = {s.get('url') for s in _existing if s.get('url')}
+                        _to_add = [s for s in _lang_tag_rejected if s.get('url') not in _seen]
+                        if _to_add:
+                            control.window.setProperty(self.itemRejected, json.dumps(_existing + _to_add))
                     fflog(f'[AUTO JAKOŚĆ] 3c lang_tag_floor: po filtrze prem_effective={len(prem_effective)}', 1, 1)
             except Exception:
                 pass
@@ -1581,8 +2428,14 @@ class sources:
                     free_effective = _xvid_cand
                 fflog(f'[AUTO JAKOŚĆ] Brak opcji do wyświetlenia — prem_effective={len(prem_effective)}, free_effective={len(free_effective)} → ANULUJ', 1, 1)
                 try:
-                    from resources.lib.modules import control
-                    control.infoDialog("Brak dostępnych źródeł.", "FanVodPL", time=3000)
+                    xbmcgui.Dialog().ok(
+                        "FanVodPL — brak źródeł",
+                        "Znaleziono źródła, ale żadne nie spełnia kryteriów.[CR][CR]"
+                        "Możliwe przyczyny:[CR]"
+                        "• brak polskiego audio (lektor/dubbing)[CR]"
+                        "• pliki poniżej minimalnego limitu GB[CR]"
+                        "• brak wymaganej rozdzielczości (HD/FULLHD/4K)"
+                    )
                 except Exception:
                     pass
                 return ("__CANCEL__", None)
@@ -1591,7 +2444,7 @@ class sources:
                 idx = 0
             else:
                 try:
-                    idx = xbmcgui.Dialog().select("Wybierz źródła — %s" % title, options)
+                    idx = xbmcgui.Dialog().select("Wybierz tryb odtwarzania (%d opcji) — %s" % (len(options), title), options)
                 except Exception:
                     idx = -1
 
@@ -1705,21 +2558,21 @@ class sources:
                                     except Exception:
                                         qh = None
                                     if qh == "2160p":
-                                        qh_str = "4K (2160p)"
+                                        qh_str = "4K"
                                     elif qh == "1080p":
-                                        qh_str = "FULLHD (1080p)"
+                                        qh_str = "FULLHD"
                                     elif qh == "720p":
-                                        qh_str = "HD (720p)"
+                                        qh_str = "HD"
                                     else:
-                                        qh_str = qh or "brak danych"
+                                        qh_str = qh or "?"
                                     size_gb = _size_gb_safe(_best_for_host)
                                     if size_gb > 0:
                                         size_str = "%.2f GB" % size_gb
                                     else:
-                                        size_str = "brak danych"
+                                        size_str = "?"
                                 else:
-                                    qh_str = "brak danych"
-                                    size_str = "brak danych"
+                                    qh_str = "?"
+                                    size_str = "?"
                                 # --- DODATEK: dopisz maksymalną rozdzielczość do etykiety hosta ---
                                 try:
                                     _max_q = None
@@ -1741,9 +2594,9 @@ class sources:
                                         prov_name = "%s (Max %s)" % (prov_name, _max_q)
                                 except Exception:
                                     pass
-                                # --- on_account: złoty kolor jeśli jakikolwiek link hosta jest na koncie ---
+                                # PATCH 2026-04-25: on_account ma być zielony, nie złoty.
                                 if any(_it.get("on_account") for _it in links):
-                                    prov_name = "[COLOR gold]%s[/COLOR]" % prov_name
+                                    prov_name = "[COLOR springgreen]%s[/COLOR]" % prov_name
                                 # --- ostrzezenie: plik ponizej normalnego progu GB (fallback) ---
                                 try:
                                     _limits_warn = self._get_limit_values()
@@ -1766,7 +2619,7 @@ class sources:
                                 payloads_hosts.append(key)
                             if options_hosts:
                                 idx_host = xbmcgui.Dialog().select(
-                                    "Wybierz host PREMIUM (%d hostów / %d źródeł) — %s" % (len(host_keys), len(base_seq or []), title),
+                                    "Wybierz host PREMIUM (%d hostów) — %s" % (len(host_keys), title),
                                     options_hosts
                                 )
                             else:
@@ -1805,18 +2658,18 @@ class sources:
                         if q not in ("2160p", "1080p", "720p") and not _classic_bypass and not _legacy_movie_q:
                             return
                         if q == "2160p":
-                            q_str = "4K (2160p)"
+                            q_str = "4K"
                         elif q == "1080p":
-                            q_str = "FULLHD (1080p)"
+                            q_str = "FULLHD"
                         elif q == "720p":
-                            q_str = "HD (720p)"
+                            q_str = "HD"
                         else:
-                            q_str = q or "brak danych"
+                            q_str = q or "?"
                         size_gb = _size_gb_safe(_it)
                         if size_gb > 0:
                             size_str = "%.2f GB" % size_gb
                         else:
-                            size_str = "brak danych"
+                            size_str = "?"
                         prov_name = (str(_it.get("provider") or _it.get("source") or "")).upper() or "?"
                         url_txt = (str(_it.get("url", "")) + " " + str(_it.get("label", ""))).lower()
                         inner_name = ""
@@ -1834,13 +2687,16 @@ class sources:
                             host_str = prov_name
                         is_ai_local = _has_ai_lektor(_it)
                         part_tag = _ff_detect_part(_it)
+                        # Ukryj part_tag jeśli nieznany
+                        part_suffix = " | [%s]" % part_tag if part_tag and "NIEZNANE" not in part_tag else ""
                         if is_ai_local:
                             ai_flag = True
-                            label = "%s | %s | %s [AI LEKTOR] | %s | [%s]" % (_prefix, q_str, size_str, host_str, part_tag)
+                            label = "%s | %s | %s | [COLOR yellow][B]AI LEKTOR[/B][/COLOR] | %s%s" % (_prefix, q_str, size_str, host_str, part_suffix)
                         else:
-                            label = "%s | %s | %s | %s | [%s]" % (_prefix, q_str, size_str, host_str, part_tag)
+                            label = "%s | %s | %s | %s%s" % (_prefix, q_str, size_str, host_str, part_suffix)
                         if _it.get("on_account"):
-                            label = "[COLOR gold]%s[/COLOR]" % label
+                            # PATCH 2026-04-25: pojedynczy link z konta wyróżniamy zielenią.
+                            label = "[COLOR springgreen]%s[/COLOR]" % label
                         options_best.append(label)
                         payloads_best.append(_it)
 
@@ -1888,10 +2744,10 @@ class sources:
                                     # Dodaj separator gdy zmienia się Part
                                     if current_part != prev_part and current_part is not None:
                                         if current_part == 1:
-                                            new_options.append("[COLOR yellow][B]========== PART 1 ==========[/B][/COLOR]")
+                                            new_options.append("[COLOR yellow][B]── Część 1 ──[/B][/COLOR]")
                                             new_payloads.append(None)  # placeholder
                                         elif current_part == 2:
-                                            new_options.append("[COLOR cyan][B]========== PART 2 ==========[/B][/COLOR]")
+                                            new_options.append("[COLOR cyan][B]── Część 2 ──[/B][/COLOR]")
                                             new_payloads.append(None)  # placeholder
                                     
                                     new_options.append(opt)
@@ -1952,31 +2808,126 @@ class sources:
                         pass
 
                     if options_best:
-                        _dialog_note_parts = []
+                        _dialog_warn_parts = []   # ostrzeżenia (pomarańczowe)
+                        _dialog_info_parts = []   # info/legenda (szare)
                         try:
                             _double_ep_note = str(getattr(self, "_ff_double_ep_ui_note", "") or "").strip()
                         except Exception:
                             _double_ep_note = ""
                         if _double_ep_note:
                             try:
-                                _dialog_note_parts.extend([_p.strip() for _p in _double_ep_note.split("|") if _p.strip()])
+                                _dialog_warn_parts.extend([_p.strip() for _p in _double_ep_note.split("|") if _p.strip()])
                             except Exception:
-                                _dialog_note_parts.append(_double_ep_note)
-                        if chosen_host_ui_note:
-                            _dialog_note_parts.append(chosen_host_ui_note)
+                                _dialog_warn_parts.append(_double_ep_note)
+                        # chosen_host_ui_note pominięte — ostrzeżenie GB było już widoczne w dialogu wyboru hosta
                         if ai_flag:
-                            _dialog_note_parts.insert(0, "UWAGA: wykryto LEKTORA AI")
-                        heading_best = "Wybierz plik (%d pozycji) — %s" % (
+                            _dialog_warn_parts.insert(0, "⚠ Wykryto lektora AI — sprawdź przed odtworzeniem")
+                        heading_best = "Wybierz plik (%d pozycji) — %s%s" % (
                             len([_p for _p in payloads_best if _p is not None]),
                             (str(chosen_host_name) or "").upper(),
+                            "  ⚠ AI" if ai_flag else "",
                         )
                         _dialog_options = list(options_best)
                         _dialog_payloads = list(payloads_best)
-                        if _dialog_note_parts:
-                            _note_rows = ["[COLOR gold][B]%s[/B][/COLOR]" % _p for _p in _dialog_note_parts]
-                            _dialog_options = _note_rows + ["[COLOR dimgray]────────────────────────[/COLOR]"] + _dialog_options
-                            _dialog_payloads = ([None] * len(_note_rows)) + [None] + _dialog_payloads
-                        
+                        try:
+                            _dialog_legend_rows = _ff_build_link_legend_rows([_it for _it in _dialog_payloads if _it is not None])
+                        except Exception:
+                            _dialog_legend_rows = []
+                        # Dodaj Oryginał do legendy jeśli wykryto w etykietach
+                        try:
+                            _has_original = any(
+
+                                str(o).startswith('Orygina')
+                                for o in _dialog_options
+                                if o and not str(o).startswith('[COLOR')
+                            )
+                            if _has_original:
+                                _dialog_legend_rows.append('[COLOR white]Oryginał = język nieznany (może być PL)[/COLOR]')
+                        except Exception:
+                            pass
+                        _dialog_info_parts.extend(_dialog_legend_rows)
+                        if _dialog_warn_parts or _dialog_info_parts:
+                            _prefix_rows = []
+                            _prefix_payloads = []
+                            # Ostrzeżenia — pomarańczowe, pogrubione
+                            for _w in _dialog_warn_parts:
+                                _prefix_rows.append("[COLOR orange][B]%s[/B][/COLOR]" % _w)
+                                _prefix_payloads.append(None)
+                            # Info/legenda — szare, bez bold
+                            for _i in _dialog_info_parts:
+                                _prefix_rows.append(_i)
+                                _prefix_payloads.append(None)
+                            _dialog_options = _prefix_rows + ["[COLOR dimgray]────────────────────────[/COLOR]"] + _dialog_options
+                            _dialog_payloads = _prefix_payloads + [None] + _dialog_payloads
+
+                        # ZMIANA (2026-04) [FEATURE]: dodaj na dole dialogu przycisk do listy
+                        # źródeł odrzuconych tylko przez weryfikację tytułu (wszystkie inne filtry
+                        # aktywne). Sentinel '__FF_TITLE_UNVERIFIED__' identyfikuje kliknięcie.
+                        # POWOD: użytkownik może chcieć ręcznie wybrać plik z inną nazwą niż tytuł.
+                        # NIE ZMIENIAC: _FF_UNVERIFIED_SENTINEL musi być unikalny (nie None, nie inny
+                        #               payload); obsługa w while True poniżej musi go wychwycić przed
+                        #               "Poprawny wybór". Nie usuwać try/except — property może być pusta.
+                        _FF_UNVERIFIED_SENTINEL = '__FF_TITLE_UNVERIFIED__'
+                        _FF_REJECTED_FILTERS_SENTINEL = '__FF_REJECTED_FILTERS__'
+                        _ff_unverified_list = []
+                        _ff_rejected_filters_list = []
+                        try:
+                            _ff_uv_raw = control.window.getProperty('FanVodPL.title_unverified_json')
+                            if _ff_uv_raw:
+                                _ff_unverified_list = json.loads(_ff_uv_raw) or []
+                        except Exception:
+                            _ff_unverified_list = []
+                        # ZMIANA (2026-04) [PATCH]: wczytaj osobny koszyk linków odrzuconych
+                        # przez frazy wpisane w ustawieniach GUI „Unikaj fraz”.
+                        # POWOD: kiedy po filtrach zostaje normalny link, ogólny fallback odrzuconych
+                        #        nie startuje, więc użytkownik potrzebuje wejścia z tego samego okna.
+                        # NIE ZMIENIAC: nie rób fallbacku do self.itemRejected; stałe blokady z kodu
+                        #               nie mają pojawiać się w tym przycisku.
+                        try:
+                            _ff_rf_raw = control.window.getProperty('FanVodPL.disallowed_rejected_json')
+                            if _ff_rf_raw:
+                                _ff_rejected_filters_list = json.loads(_ff_rf_raw) or []
+                        except Exception:
+                            _ff_rejected_filters_list = []
+                        try:
+                            _seen_rf = set()
+                            _rf_clean = []
+                            for _rf in _ff_rejected_filters_list:
+                                _rf_url = str((_rf or {}).get('url', '') or '')
+                                if _rf_url and _rf_url not in _seen_rf:
+                                    _seen_rf.add(_rf_url)
+                                    _rf_clean.append(_rf)
+                            _ff_rejected_filters_list = _rf_clean
+                        except Exception:
+                            pass
+                        if _ff_unverified_list or _ff_rejected_filters_list:
+                            _dialog_options.append('[COLOR dimgray]────────────────────────[/COLOR]')
+                            _dialog_payloads.append(None)
+                        if _ff_unverified_list:
+                            # ZMIANA (2026-04) [FEATURE]: tekst przycisku zależny od kontekstu
+                            # (serial → "odcinkowi", film → "filmowi").
+                            # NIE ZMIENIAC: property title_unverified_is_episode ustawiane
+                            #               w sourcesFilter razem z title_unverified_json.
+                            _ff_uv_is_ep = control.window.getProperty('FanVodPL.title_unverified_is_episode') == '1'
+                            _ff_uv_ctx = 'odcinkowi' if _ff_uv_is_ep else 'filmowi'
+                            _dialog_options.append(
+                                '[COLOR yellow]Niezweryfikowane tytułem (%d) — może nie pasować %s[/COLOR]'
+                                % (len(_ff_unverified_list), _ff_uv_ctx)
+                            )
+                            _dialog_payloads.append(_FF_UNVERIFIED_SENTINEL)
+
+                        if _ff_rejected_filters_list:
+                            # ZMIANA (2026-04) [PATCH]: pokaż w tym samym oknie tylko linki
+                            # odrzucone przez użytkownika w GUI „Unikaj fraz”.
+                            # POWOD: użytkownik może ręcznie wejść do XT7/TWOJPLIK, gdy filtr
+                            #        zostawił np. tylko NOPREMIUM na czystej liście.
+                            # NIE ZMIENIAC: stałe zakazane frazy z _FF_DEFAULT_BLOCK nie trafiają do tej listy.
+                            _dialog_options.append(
+                                '[COLOR orange]Odrzucone przez Unikaj fraz z ustawień GUI (%d) — ręczny wybór[/COLOR]'
+                                % (len(_ff_rejected_filters_list),)
+                            )
+                            _dialog_payloads.append(_FF_REJECTED_FILTERS_SENTINEL)
+
                         # Pętla obsługi wyboru (ignoruj kliknięcia na separatory)
                         while True:
                             idx_best = xbmcgui.Dialog().select(heading_best, _dialog_options)
@@ -1984,12 +2935,49 @@ class sources:
                                 return ("__CANCEL__", None)
                             if idx_best >= len(_dialog_payloads):
                                 return ("__CANCEL__", None)
-                            
+
                             # Sprawdź czy kliknięto separator / notatkę
                             if _dialog_payloads[idx_best] is None:
                                 # Ignoruj kliknięcie, pokaż dialog ponownie
                                 continue
-                            
+
+                            # ZMIANA (2026-04) [FEATURE]: obsługa kliknięcia przycisku
+                            # "Niezweryfikowane tytułem" — otwiera subdialog z tymi źródłami.
+                            # POWOD: sentinel odróżnia ten wpis od normalnych payloadów (dict źródła).
+                            # NIE ZMIENIAC: continue po anulowaniu subdialoga — wraca do głównego
+                            #               dialogu; break po wyborze — kończy pętlę z wybranym best.
+                            if _dialog_payloads[idx_best] == _FF_UNVERIFIED_SENTINEL:
+                                _uv_opts = [
+                                    str(_uv.get('label') or _uv.get('url') or '?')
+                                    for _uv in _ff_unverified_list
+                                ]
+                                _uv_idx = xbmcgui.Dialog().select(
+                                    'Niezweryfikowane tytułem (%d pozycji)' % len(_ff_unverified_list),
+                                    _uv_opts
+                                )
+                                if _uv_idx < 0:
+                                    continue  # anulowano subdialog — wróć do głównego
+                                best = _ff_unverified_list[_uv_idx]
+                                break
+
+                            # ZMIANA (2026-04) [PATCH]: obsługa ręcznego wejścia do linków
+                            # odrzuconych przez „Unikaj fraz” z ustawień GUI z tego samego okna wyboru.
+                            # POWOD: sentinel odróżnia ten wpis od zwykłego źródła i od niezweryfikowanych tytułem.
+                            # NIE ZMIENIAC: anulowanie subdialogu wraca do głównego okna, a wybór ustawia best.
+                            if _dialog_payloads[idx_best] == _FF_REJECTED_FILTERS_SENTINEL:
+                                _rf_opts = [
+                                    str(_rf.get('label') or _rf.get('url') or '?')
+                                    for _rf in _ff_rejected_filters_list
+                                ]
+                                _rf_idx = xbmcgui.Dialog().select(
+                                    'Odrzucone przez Unikaj fraz z ustawień GUI (%d pozycji)' % len(_ff_rejected_filters_list),
+                                    _rf_opts
+                                )
+                                if _rf_idx < 0:
+                                    continue  # anulowano subdialog — wróć do głównego
+                                best = _ff_rejected_filters_list[_rf_idx]
+                                break
+
                             # Poprawny wybór
                             best = _dialog_payloads[idx_best]
                             break
@@ -2039,23 +3027,24 @@ class sources:
                         except Exception:
                             q = None
                         if q == "2160p":
-                            q_str = "4K (2160p)"
+                            q_str = "4K"
                         elif q == "1080p":
-                            q_str = "FULLHD (1080p)"
+                            q_str = "FULLHD"
                         elif q == "720p":
-                            q_str = "HD (720p)"
+                            q_str = "HD"
                         else:
-                            q_str = q or "brak danych"
+                            q_str = q or "?"
                         size_gb = _size_gb_safe(_it)
                         if size_gb > 0:
                             size_str = "%.2f GB" % size_gb
                         else:
-                            size_str = "brak danych"
+                            size_str = "?"
                         try:
                             part_tag = _ff_detect_part(_it)
                         except Exception:
                             part_tag = "NIEZNANE ?"
-                        options_hosts.append("%s | %s | %s | [%s]" % (prov, q_str, size_str, part_tag))
+                        part_suffix = " | [%s]" % part_tag if part_tag and "NIEZNANE" not in part_tag else ""
+                        options_hosts.append("%s | %s | %s%s" % (prov, q_str, size_str, part_suffix))
                         payloads_hosts.append(_it)
                     if options_hosts:
                         _free_heading = "Wybierz darmowy host (%d pozycji) — %s" % (len(options_hosts), title)
@@ -2071,8 +3060,14 @@ class sources:
 
             if not best:
                 try:
-                    from resources.lib.modules import control
-                    control.infoDialog("Brak dopasowanych linków po filtrach.", "FanVodPL", time=3000)
+                    xbmcgui.Dialog().ok(
+                        "FanVodPL — brak źródeł",
+                        "Nie znaleziono żadnych źródeł dla tego tytułu.[CR][CR]"
+                        "Możliwe przyczyny:[CR]"
+                        "• serwisy tymczasowo niedostępne[CR]"
+                        "• tytuł niedostępny w polskich serwisach[CR]"
+                        "• problem z połączeniem"
+                    )
                 except Exception:
                     pass
                 return ("__CANCEL__", None)
@@ -2095,18 +3090,18 @@ class sources:
                 except Exception:
                     q_sub = None
                 if q_sub == "2160p":
-                    subs_q_str = "4K (2160p)"
+                    subs_q_str = "4K"
                 elif q_sub == "1080p":
-                    subs_q_str = "FULLHD (1080p)"
+                    subs_q_str = "FULLHD"
                 elif q_sub == "720p":
-                    subs_q_str = "HD (720p)"
+                    subs_q_str = "HD"
                 else:
-                    subs_q_str = q_sub or "brak danych"
+                    subs_q_str = q_sub or "?"
                 size_sub_gb = _size_gb_safe(subs_best)
                 if size_sub_gb > 0:
                     subs_size_str = "%.2f GB" % size_sub_gb
                 else:
-                    subs_size_str = "brak danych"
+                    subs_size_str = "?"
                 subs_summary = "%s | Napisy PL | %s" % (subs_q_str, subs_size_str)
 
             # 8) Informacja o najlepszym pliku
@@ -2115,13 +3110,13 @@ class sources:
             except Exception:
                 q = None
             if q == "2160p":
-                q_str = "4K (2160p)"
+                q_str = "4K"
             elif q == "1080p":
-                q_str = "FULLHD (1080p)"
+                q_str = "FULLHD"
             elif q == "720p":
-                q_str = "HD (720p)"
+                q_str = "HD"
             else:
-                q_str = q or "brak danych"
+                q_str = q or "?"
 
             tmeta = _tmeta(best)
             lang = str(best.get("language", "")).lower()
@@ -2149,7 +3144,7 @@ class sources:
             if size_gb > 0:
                 size_str = "%.2f GB" % size_gb
             else:
-                size_str = "brak danych"
+                size_str = "?"
 
             heading = "Najlepsze źródło — %s" % ("PREMIUM" if mode == "premium" else "DARMOWE")
             line1 = "Rozdzielczość: %s" % q_str
@@ -2316,6 +3311,13 @@ class sources:
         ):
         fflog(f'[play] start', 0)
         # fflog(f'\n{title=} \n{localtitle=} \n{year=} \n{imdb=} \n{tvdb=} \n{tmdb=} \n{season=} \n{episode=} \n{tvshowtitle=} \n{premiered=} \n{meta=} \n{select=} \n{customTitles=} \n{originalname=}  \n{epimdb=}',1,1)
+
+        # [FIX] Wyczyść flagę userJustCancelled z poprzedniego cyklu —
+        # inaczej REJECTED FALLBACK nigdy nie pokaże folderu odrzuconych
+        try:
+            control.window.clearProperty('FanVodPL.userJustCancelled')
+        except Exception:
+            pass
 
         meta1 = None
 
@@ -2517,6 +3519,7 @@ class sources:
             fflog(f'{params2=}', 0)
 
         items = None
+        preview_mode = "play"
 
         if control.setting("crefresh") != "true":
 
@@ -2764,7 +3767,7 @@ class sources:
                             _next_season = str(_season_i + 1)
                             fflog(f"[DOUBLE-EP] Nie znaleziono Part 2 w S{_season_i}E{_pair_ep}", 0)
                             try:
-                                setattr(self, "_ff_double_ep_ui_note", "Tylko PART 1 | PART 2: S%sE01" % _next_season)
+                                setattr(self, "_ff_double_ep_ui_note", "Tylko PART 1 | PART 2: S%sE01 — CZĘŚĆ 2 W SEZONIE %s" % (_next_season, _next_season))
                             except Exception:
                                 pass
                             try:
@@ -2793,7 +3796,7 @@ class sources:
                                 _ui_note = getattr(self, "_ff_double_ep_ui_note", "") or ""
                                 if "PART 2: S" not in _ui_note:
                                     _next_season = str(_season_i + 1)
-                                    _ui_note = "Tylko PART 1 | PART 2: S%sE01" % _next_season
+                                    _ui_note = "Tylko PART 1 | PART 2: S%sE01 — CZĘŚĆ 2 W SEZONIE %s" % (_next_season, _next_season)
                                 setattr(self, "_ff_double_ep_ui_note", _ui_note)
                             except Exception:
                                 pass
@@ -2814,12 +3817,21 @@ class sources:
             # === END DOUBLE-EP PART 1/PART 2 SELECTION PATCH ===
 
             fflog(f'[play] otrzymano jakieś wyniki', 0)
-            fflog(f'{len(items)=}')  # może być zero, ale mogą być "w koszu"
+            fflog(f'len(items)={len(items) if items is not None else None}')  # może być zero, ale mogą być "w koszu"
         else:
             fflog(f'[play] nie będzie procesu wyszukiwania źródeł', 0)
             pass
         # === [AUTO JAKOŚĆ – GLOBAL TRIGGER TUŻ PO ZEBRANIU ITEMS] ===
         try:
+            if items is None:
+                # PATCH: użytkownik nacisnął Anuluj w dialogu HostSelect — czyste wyjście bez fallbacku
+                fflog('[HostSelect] Anuluj → czyste wyjście, brak fallbacku do odrzuconych', 1, 1)
+                try:
+                    import xbmcplugin as _xbmcplugin, xbmcgui as _xbmcgui
+                    _xbmcplugin.setResolvedUrl(int(sys.argv[1]), False, _xbmcgui.ListItem())
+                except Exception:
+                    pass
+                return
             if items and isinstance(items, list) and len(items) > 0:
                 # --- SD policy context (legacy exception) ---
                 try:
@@ -2835,25 +3847,139 @@ class sources:
                 except Exception:
                     _is_part = False
 
-                _autoplay_mode = (control.setting("hosts.mode") == "2")
+                # ZMIANA (2026-04) [PATCH]: odczyt hosts.mode przez fresh Addon() zamiast control.setting()
+                # POWOD: control.setting() uzywa starego Addon() instance — zwraca "" na swiezej instalacji
+                #   (brak settings.xml), co powodowalo _autoplay_mode=False i wejscie w tryb katalogu.
+                # NIE ZMIENIAC: nie cofac do control.setting(). Gdy _hm0=="" default musi byc True (autoplay).
+                try:
+                    import xbmcaddon as _xad
+                    _hm0 = _xad.Addon().getSetting("hosts.mode")
+                    _autoplay_mode = (_hm0 == "2") if _hm0 != "" else True
+                except Exception:
+                    _autoplay_mode = True
 
                 # Bypass już nie jest potrzebny - select="0" dla Part 1/2 załatwia sprawę
                 chosen_label, filtered_items = self._auto_quality_dialog_and_filter(title, items)
             else:
+                # --- brak linków po filtrach ---
+                _rejected_fallback = []
                 try:
-                    control.infoDialog(
-                        "Brak dostępnych źródeł dla tego tytułu.",
-                        heading="FanVodPL",
-                        icon="INFO",
-                        time=2500,
-                        sound=False,
-                    )
+                    _raw_prop = control.window.getProperty(self.itemRejected)
+                    fflog(f'[REJECTED FALLBACK] ODCZYT itemRejected: raw_len={len(_raw_prop)}', 1, 1)
+                    _rejected_fallback = json.loads(_raw_prop) or []
+                    fflog(f'[REJECTED FALLBACK] ODCZYT parsed: {len(_rejected_fallback)} elementów', 1, 1)
+                except Exception:
+                    fflog('[REJECTED FALLBACK] błąd odczytu itemRejected', 1, 1)
+                    _rejected_fallback = []
+
+                # ZMIANA (2026-04) [PATCH]: gdy normalna lista jest pusta i itemRejected też jest pusty,
+                # sprawdź osobną listę FanVodPL.title_unverified_json i pokaż folder odrzuconych.
+                # POWOD: źródła odrzucone wyłącznie przez weryfikację tytułu były zapisywane, ale przy
+                #        itemRejected=[] kończyło się klasycznym „brak źródeł” zamiast folderem
+                #        „Niezweryfikowane tytułem”. Dotyczy premium i darmowych źródeł.
+                # NIE ZMIENIAC: nie scalać title_unverified z itemRejected; folder showItems&trash=1 sam
+                #               pokaże podfolder unverified_title=1, a ogólne filtry zostają bez zmian.
+                _title_unverified_fallback = []
+                try:
+                    _tu_raw_prop = control.window.getProperty('FanVodPL.title_unverified_json')
+                    fflog(f'[REJECTED FALLBACK] ODCZYT title_unverified: raw_len={len(_tu_raw_prop)}', 1, 1)
+                    _title_unverified_fallback = json.loads(_tu_raw_prop) if _tu_raw_prop else []
+                    fflog(f'[REJECTED FALLBACK] title_unverified parsed: {len(_title_unverified_fallback)} elementów', 1, 1)
+                except Exception:
+                    fflog('[REJECTED FALLBACK] błąd odczytu title_unverified_json', 1, 1)
+                    _title_unverified_fallback = []
+
+                # jeśli user właśnie anulował z listy odrzuconych — nie otwieraj trash ponownie
+                _just_cancelled = False
+                try:
+                    _just_cancelled = control.window.getProperty('FanVodPL.userJustCancelled') == '1'
+                    if _just_cancelled:
+                        control.window.clearProperty('FanVodPL.userJustCancelled')
                 except Exception:
                     pass
-                chosen_label, filtered_items = ("__CANCEL__", None)
+
+                if _rejected_fallback and not _just_cancelled:
+                    # są odrzucone — pokaż notyfikację i od razu przejdź do listy odrzuconych
+                    fflog(f'[REJECTED FALLBACK] items=0 ale rejected={len(_rejected_fallback)} — przekierowanie do showItems', 1, 1)
+                    try:
+                        control.infoDialog(
+                            f'Filtry odrzuciły wszystkie linki ({len(_rejected_fallback)}). Pokazuję odrzucone źródła.',
+                            heading='FanVodPL — odrzucone przez filtry',
+                            icon='WARNING',
+
+                            sound=False,
+                            time=3000,
+                        )
+                    except Exception:
+                        pass
+                    chosen_label, filtered_items = ("__REJECTED_SHOW__", _rejected_fallback)
+                elif _title_unverified_fallback and not _just_cancelled:
+                    # są tylko źródła odrzucone weryfikacją tytułu — pokaż folder odrzuconych z podfolderem UV
+                    fflog(
+                        f'[REJECTED FALLBACK] items=0, rejected=0, title_unverified={len(_title_unverified_fallback)} '
+                        '— przekierowanie do showItems trash=1',
+                        1,
+                        1
+                    )
+                    try:
+                        control.infoDialog(
+                            f'Weryfikacja tytułu odrzuciła wszystkie linki ({len(_title_unverified_fallback)}). '
+                            'Pokazuję folder „Niezweryfikowane tytułem”.',
+                            heading='FanVodPL — niezweryfikowane tytułem',
+                            icon='WARNING',
+                            sound=False,
+                            time=3000,
+                        )
+                    except Exception:
+                        pass
+                    chosen_label, filtered_items = ("__REJECTED_SHOW__", _title_unverified_fallback)
+                else:
+                    # brak linków i brak odrzuconych — klasyczny dialog
+                    fflog('[REJECTED FALLBACK] items=0, rejected=0 i title_unverified=0 — klasyczny brak źródeł', 1, 1)
+                    try:
+                        xbmcgui.Dialog().ok(
+                            "FanVodPL — brak źródeł",
+                            "Nie znaleziono żadnych źródeł dla tego tytułu.[CR][CR]"
+                            "Możliwe przyczyny:[CR]"
+                            "• serwisy tymczasowo niedostępne[CR]"
+                            "• tytuł niedostępny w polskich serwisach[CR]"
+                            "• problem z połączeniem"
+                        )
+                    except Exception:
+                        pass
+                    chosen_label, filtered_items = ("__CANCEL__", None)
         except Exception as e:
             fflog(f'[AUTO JAKOŚĆ] wyjątek: {e}', 1, 1)
             chosen_label, filtered_items = (None, None)
+
+        # --- [ODRZUCONE] -> items=0 ale są odrzucone — pokaż je jako katalog ---
+
+        if chosen_label == "__REJECTED_SHOW__":
+            fflog('[REJECTED FALLBACK] Container.Update → showItems trash=1', 1, 1)
+            try:
+                _ff_arm_failed_playback_blocker(15000)
+                _ff_watch_close_okdialog(6)
+            except Exception:
+                pass
+            try:
+                xbmc.executebuiltin('PlayerControl(Stop)')
+            except Exception:
+                pass
+            try:
+                _sysaddon = sys.argv[0]
+                _trash_url = f'{_sysaddon}?action=showItems&trash=1'
+                if title:
+                    import urllib.parse as _urlparse
+                    _trash_url += f'&title={_urlparse.quote(title)}'
+                if season is not None:
+                    _trash_url += f'&season={season}'
+                if episode is not None:
+                    _trash_url += f'&episode={episode}'
+                fflog(f'[REJECTED FALLBACK] url={_trash_url}', 1, 1)
+                xbmc.executebuiltin(f'Container.Update({_trash_url})')
+            except Exception as _e:
+                fflog(f'[REJECTED FALLBACK] błąd Container.Update: {_e}', 1, 1)
+            return
 
         # --- [ANULUJ] -> po anulowaniu AUTO JAKOŚCI wróć do listy źródeł (jak klasyczny FanFilm) ---
 
@@ -2915,7 +4041,19 @@ class sources:
                         return m.group(1) if m else ""
                     _hosts = sorted({h for h in (_ff_host(it) for it in (filtered_items or [])) if h})
                     # >>> FREE_AUTOPLAY via property
-                    if control.setting('hosts.mode') == '2' and control.window.getProperty('FF.FREE_BUCKET_AUTOPLAY') == '1':
+                    # ZMIANA (2026-04) [PATCH]: odczyt hosts.mode przez fresh Addon() zamiast control.setting()
+                    # POWOD: control.setting() uzywa starego Addon() instance — zwraca "" na swiezej instalacji
+                    #   (brak settings.xml), co powodowalo pominiecie bloku FREE_BUCKET_AUTOPLAY (warunkek
+                    #   hosts.mode=='2' nie byl spelniony) i brak przycięcia _hosts do 1 elementu.
+                    # NIE ZMIENIAC: nie cofac do control.setting('hosts.mode'). Gdy _hm2=="" default to "2"
+                    #   (autoplay) — identyczna logika jak w pozostalych miejscach odczytu hosts.mode.
+                    try:
+                        import xbmcaddon as _xad2
+                        _hm2 = _xad2.Addon().getSetting('hosts.mode')
+                        _hm2 = _hm2 if _hm2 != "" else "2"
+                    except Exception:
+                        _hm2 = "2"
+                    if _hm2 == '2' and control.window.getProperty('FF.FREE_BUCKET_AUTOPLAY') == '1':
                         _hosts = _hosts[:1]
                         control.window.clearProperty('FF.FREE_BUCKET_AUTOPLAY')
                     # <<< FREE_AUTOPLAY via property
@@ -2923,7 +4061,7 @@ class sources:
                     if len(_hosts) > 1:
                         import xbmcgui
                         _opts = ["Auto"] + _hosts
-                        _hi = xbmcgui.Dialog().select("[FF] Host darmowe", _opts)
+                        _hi = xbmcgui.Dialog().select("Wybierz host darmowy", _opts)
                         if _hi < 0:
                             # >>> PATCH: FREE_HOST_CANCEL – bezpieczny powrót bez spinnera
                             try:
@@ -2945,7 +4083,17 @@ class sources:
                             filtered_items = [it for it in filtered_items if _ff_host(it) == _sel]
                 except Exception:
                     pass
-            autoplay_enabled = (control.setting("hosts.mode") == "2")
+            # ZMIANA (2026-04) [PATCH]: autoplay_enabled czyta hosts.mode przez fresh Addon()
+            # POWOD: control.setting() uzywa starego Addon() instance — na swiezej instalacji
+            #   (brak settings.xml) zwraca "", co dawalo autoplay_enabled=False → katalog zamiast autoplay.
+            # NIE ZMIENIAC: nie cofac do control.setting(). Gdy _hm3=="" default musi byc True.
+            #   Ten blad byl juz raz naprawiony — kazda zmiana tego fragmentu wymaga re-testu swiezej instalacji.
+            try:
+                import xbmcaddon as _xad3
+                _hm3 = _xad3.Addon().getSetting("hosts.mode")
+                autoplay_enabled = (_hm3 == "2") if _hm3 != "" else True  # świeża instalacja = autoplay
+            except Exception:
+                autoplay_enabled = True  # domyślnie autoplay gdy błąd odczytu
             # Wymuś katalog dla darmowych w tej sesji
             if control.window.getProperty("FanVodPL.forceCatalogThisSession") == "true":
                 autoplay_enabled = False
@@ -2981,6 +4129,18 @@ class sources:
                     _ff_safe_close_ui()
                     from ptw.libraries.player import player
                     control.window.clearProperty("FanVodPL.forceCatalogThisSession")
+                    # ZMIANA (2026-04) [PATCH]: handle=-1 do player().run() bez resolve(handle, False)
+                    # POWOD: resolve(handle, False) generuje DialogConfirm "Nieudane odtwarzanie" na poziomie
+                    #   C++ Kodi (Playlist Player: skipping unplayable item). Python-level bloker
+                    #   _ff_arm_failed_playback_blocker dziala tylko na xbmcgui.Dialog() i nie moze
+                    #   zablokowac tego dialogu C++. Klikniecie OK/NIE wywoluje
+                    #   CWinSystemAndroid::DestroyWindow -> CloseFile i zatrzymuje film
+                    #   (potwierdzone logiem 2026-04-19, OnePlus A6003 i Samsung Exynos).
+                    #   Gdy control.player.play() (handle=-1) juz dziala, Kodi nie pokazuje spinnera
+                    #   po wyganieciu starego handle — resolve(handle, False) jest zbedne i szkodliwe.
+                    # NIE ZMIENIAC: nie przywracac resolve(handle, False) ani _ff_arm_failed_playback_blocker.
+                    #   Nie przywracac handle=int(sys.argv[1]) do player().run() — handle=-1 celowe
+                    #   (wymusza control.player.play() zamiast setResolvedUrl).
                     try:
                         fflog('[AUTO JAKOŚĆ] starting player.run', 1)# === FFGPT5: disable resolve-first to allow player().run (watched/history fix) ===
 # [FFG-PAUSE] 
@@ -2996,7 +4156,8 @@ class sources:
 # [FFG-PAUSE]                         except Exception as _e:
 # [FFG-PAUSE]                             pass
 # [FFG-PAUSE] # === /FFGPT5 ===
-                        player().run((title, localtitle, originalname, meta.get("tvshowtitle", "")), year, season, episode, imdb, tvdb, tmdb, url, subs, meta, handle, hosting=item.get("source"), customPlayer=item.get("customPlayer"))
+                        _ff_set_source_url_prop(item)
+                        player().run((title, localtitle, originalname, meta.get("tvshowtitle", "")), year, season, episode, imdb, tvdb, tmdb, url, subs, meta, -1, hosting=item.get("source"), customPlayer=item.get("customPlayer"))
                         try:
                             _ff_return_to_last_sources(self, title, items, filtered_items, season, episode)
                         except Exception:
@@ -3200,7 +4361,11 @@ class sources:
                     return url  # w sumie mogłoby tego nie być bo url jest nonlocal
                 # url = wybieranie_zrodla()
                 wybieranie_zrodla()
+                preview_mode = _ff_choose_playback_mode(item=item if "item" in locals() else None, allow_preview=bool(url and not str(url).startswith('close://')))
+                if preview_mode == "cancel":
+                    return
             else:  # select ==2 (autoplay)
+                preview_mode = "play"
                 ret_item = True
                 # ret_item = True if params2.get("download") else False
                 url = self.sourcesDirect(items, ret_item=ret_item)  # zwraca pierwszą pozycję z listy
@@ -3298,6 +4463,11 @@ class sources:
                     fflog('próba przejścia z polecenia PlayMedia na katalog',1,1)
                     handle = int(sys.argv[1])
                     if control.window.getProperty("FanVodPL.skipResolveOnce") != "true":
+                        try:
+                            _ff_arm_failed_playback_blocker(10000)
+                            _ff_watch_close_okdialog(6)
+                        except Exception:
+                            pass
                         control.resolve(handle, False, control.item(path=''))  # próba odwołania polecenia "PlayMedia"
                     # niestety, ale pewnie i tak pojawi się pewnie komunikat "Nieudane odtwarzanie", a w logu "Playlist Player: skipping unplayable item"
                     # a z fejkowym video są problemy, a pusta lista m3u8 coś nie chce mi działać
@@ -3319,6 +4489,9 @@ class sources:
                 # control.sleep0(500)
                 # player().play(url)  # zawiesza mi Kodi (u innych niekoniecznie), ale i tak ma to minus, bo nie będzie oznaczenie materiału, że został obejrzany w FanVodPL
                 try:
+                    if preview_mode == "preview":
+                        if _ff_run_preview_5min(url, title=localtitle or title, meta=meta, subs=subs):
+                            return
                     fflog('[AUTO JAKOŚĆ] starting player.run', 1)# === FFGPT5: disable resolve-first to allow player().run (watched/history fix) ===
 # [FFG-PAUSE] 
 # [FFG-PAUSE]                     # FFRF: resolve-first (setResolvedUrl) for proper return to list
@@ -3333,6 +4506,7 @@ class sources:
 # [FFG-PAUSE]                     except Exception as _e:
 # [FFG-PAUSE]                         pass
 # [FFG-PAUSE] # === /FFGPT5 ===
+                    _ff_set_source_url_prop(item)
                     player().run( (title, localtitle, originalname, meta.get("tvshowtitle", "")), year, season, episode, imdb, tvdb, tmdb, url, subs, meta, hosting=item.get("source"), customPlayer=item.get("customPlayer") )
                     try:
                         _ff_return_to_last_sources(self, title, items, filtered_items, season, episode)
@@ -3360,6 +4534,11 @@ class sources:
                     fflog('próba przejścia na katalog',1,1)
                     handle = int(sys.argv[1])
                     if control.window.getProperty("FanVodPL.skipResolveOnce") != "true":
+                        try:
+                            _ff_arm_failed_playback_blocker(10000)
+                            _ff_watch_close_okdialog(6)
+                        except Exception:
+                            pass
                         control.resolve(handle, False, control.item(path=''))  # próba odwołania polecenia "PlayMedia"
                     # niestety, ale pewnie i tak pojawi się pewnie komunikat "Nieudane odtwarzanie", a w logu "Playlist Player: skipping unplayable item"
                     # a z fejkowym video są problemy, a pusta lista m3u8 coś nie chce mi działać
@@ -3378,6 +4557,9 @@ class sources:
                 from ptw.libraries.player import player
                 control.window.clearProperty("FanVodPL.forceCatalogThisSession")
                 try:
+                    if preview_mode == "preview":
+                        if _ff_run_preview_5min(url, title=localtitle or title, meta=meta, subs=subs):
+                            return
                     fflog('[AUTO JAKOŚĆ] starting player.run', 1)# === FFGPT5: disable resolve-first to allow player().run (watched/history fix) ===
 # [FFG-PAUSE] 
 # [FFG-PAUSE]                     # FFRF: resolve-first (setResolvedUrl) for proper return to list
@@ -3392,6 +4574,7 @@ class sources:
 # [FFG-PAUSE]                     except Exception as _e:
 # [FFG-PAUSE]                         pass
 # [FFG-PAUSE] # === /FFGPT5 ===
+                    _ff_set_source_url_prop(item)
                     player().run( (title, localtitle, originalname, meta.get("tvshowtitle", "")), year, season, episode, imdb, tvdb, tmdb, url, subs, meta, hosting=item.get("source"), customPlayer=item.get("customPlayer") )
                     try:
                         _ff_return_to_last_sources(self, title, items, filtered_items, season, episode)
@@ -3483,8 +4666,10 @@ class sources:
 
 
         try:
-            if xbmc:
-                control.window.setProperty('FanVodPL.var.return_to_sources_url', xbmc.getInfoLabel('Container.FolderPath'))
+            if xbmc and not trash:  # trash: nie nadpisuj URL powrotu — żeby ANULUJ nie wracał do listy odrzuconych
+                _folder_path = xbmc.getInfoLabel('Container.FolderPath')
+                if 'trash' not in _folder_path:  # nie nadpisuj jeśli wchodzimy z folderu odrzuconych
+                    control.window.setProperty('FanVodPL.var.return_to_sources_url', _folder_path)
         except Exception:
             pass
         def sourcesDirMeta(metadata):
@@ -3527,15 +4712,76 @@ class sources:
 
         #if name == "odrzucone":
         if trash:
-            items = control.window.getProperty(self.itemRejected)
+            # ZMIANA (2026-04) [PATCH]: obsługa parametru unverified_title=1 — gdy wchodzimy
+            # do podkatalogu "Niezweryfikowane tytułem" wewnątrz folderu odrzucone, ładujemy
+            # źródła z FanVodPL.title_unverified_json zamiast z itemRejected.
+            # POWOD: użytkownik chciał mieć osobny podfolder z linkami odrzuconymi tylko przez
+            #        weryfikację tytułu (nie przez zakazane frazy ani filtry jakości).
+            # NIE ZMIENIAC: gdy unverified_title != '1' zachowanie jest identyczne jak przed
+            #               tą zmianą — ładuje itemRejected. Nie scalać ścieżek if/else.
             try:
-                items = json.loads(items)
-            except:
-                control.dialog.notification('FanVodPL', 'wystąpił jakiś błąd', xbmcgui.NOTIFICATION_ERROR)
-                fflog_exc()
-                return
+                _trash_params = dict(parse_qsl(sys.argv[2][1:]))
+                _is_unverified_subfolder = _trash_params.get('unverified_title') == '1'
+            except Exception:
+                _is_unverified_subfolder = False
+
+            if _is_unverified_subfolder:
+                # tryb podkatalogu niezweryfikowanych tytułem
+                try:
+                    _uv_raw = control.window.getProperty('FanVodPL.title_unverified_json')
+                    items = json.loads(_uv_raw) if _uv_raw else []
+                except Exception:
+                    items = []
+                if not items:
+                    try:
+                        control.dialog.notification(
+                            'FanVodPL',
+                            'Brak źródeł niezweryfikowanych tytułem.',
+                            xbmcgui.NOTIFICATION_INFO
+                        )
+                    except Exception:
+                        pass
+                    fflog('[TRASH-UV] brak elementów title_unverified_json', 1)
+                    return
+                fflog(f'[TRASH-UV] załadowano {len(items)} niezweryfikowanych tytułem', 1)
+            else:
+                # standardowy tryb folderu odrzucone
+                items = control.window.getProperty(self.itemRejected)
+                try:
+                    items = json.loads(items)
+                except Exception:
+                    control.dialog.notification('FanVodPL', 'wystąpił jakiś błąd', xbmcgui.NOTIFICATION_ERROR)
+                    fflog_exc()
+                    return
             #items = self.sortSources(items)
             #items = self.renumberSources(items)  # nie ma jeszcze takiej funkcji
+
+            # --- filtr CAM/TS/HDTV dla listy odrzuconych ---
+            try:
+                _cam_filter = dict(parse_qsl(sys.argv[2][1:])).get('cam_filter', '')
+                _CAM_RE = re.compile(
+                    r'(?<![A-Z0-9])'
+                    r'(CAM[\-\.]?RIP|CAMRIP|CAM'
+                    r'|HD[\-\.]?TS|HDTS|TS'
+                    r'|HD[\-\.]?TV|HDTV'
+                    r'|TELESYNC|TELECINE|TC'
+                    r'|SCR(?:EENER)?)'
+                    r'(?![A-Z0-9])',
+                    re.IGNORECASE
+                )
+                def _is_cam(it):
+                    label = it.get('label') or ''
+                    url   = it.get('url') or ''
+                    fname = it.get('filename') or ''
+                    return bool(_CAM_RE.search(label) or _CAM_RE.search(url) or _CAM_RE.search(fname))
+
+                if _cam_filter == 'hide':
+                    items = [it for it in items if not _is_cam(it)]
+                elif _cam_filter == 'only':
+                    items = [it for it in items if _is_cam(it)]
+                # brak parametru = wszystkie
+            except Exception:
+                pass
         elif not items:
             items = control.window.getProperty(self.itemProperty)
             try:
@@ -3572,7 +4818,7 @@ class sources:
         # ani do pod-katalogów hostów. Tutaj stosujemy te same limity, ale wyłącznie
         # dla źródeł premium (darmowe pozostają bez filtra rozmiaru).
         try:
-            if items and isinstance(items, list):
+            if not trash and items and isinstance(items, list):  # trash: nie filtruj — to już odrzucone przez filtry
                 _prem_flags = [bool(self._is_premium_provider(it)) for it in items]
                 if any(_prem_flags):
                     _prem_only = all(_prem_flags)
@@ -3735,6 +4981,7 @@ class sources:
                     # if meta.get("mediatype") == "tvshow":  # nie zawsze działa np. nie działa dla źródeł odcinka
                     # problem ulubionych jest to, że nie są zapamiętywane dane obiektu ListItem, a tylko label, icon oraz path
                     # ale tu w sumie nie ma aż tak o co walczyć, bo to się nie wyświetla w oknie, choć w bazie MyVideos zapisują się długie ścieżki
+
 
                 if "tvshowtitle" in meta and "season" in meta and "episode" in meta:  # to jest obowiązkowo potrzebne dla krótkich adresów, ale także przydaje się, gdy były modyfikowane parametry do wyszukiwarki
                     # sysurl = "%s?action=playItem&source=%s&imdb=%s&tmdb=%s&season=%s&episode=%s" % (sysaddon, syssource, meta.get("imdb",""), meta.get("tmdb",""), meta.get("season"), meta.get("episode"))
@@ -3911,6 +5158,66 @@ class sources:
                 continue
 
         # fflog(f'{len(list_of_items)=}',1,1)
+
+        # --- foldery filtrów CAM/TS/HDTV (tylko w liście odrzuconych) ---
+        if trash:
+            try:
+                _ff_arm_failed_playback_blocker(15000)
+                _ff_watch_close_okdialog(6)
+            except Exception:
+                pass
+            try:
+                _cur_cam_filter = dict(parse_qsl(sys.argv[2][1:])).get('cam_filter', '')
+                _base_trash_url = f'{sysaddon}?action=showItems&trash=1'
+                if title:
+                    _base_trash_url += f'&title={systitle}'
+                if season is not None:
+                    _base_trash_url += f'&season={season}'
+                if episode is not None:
+                    _base_trash_url += f'&episode={episode}'
+                _filter_defs = [
+                    ('',     '[I]Wszystkie odrzucone[/I]',             1997),
+                    ('hide', '[I]Ukryj CAM / TS / HDTV[/I]',          1998),
+                    ('only', '[I]Tylko CAM / TS / HDTV[/I]',          1999),
+                ]
+                for _fval, _flabel, _fcount in _filter_defs:
+                    if _fval == _cur_cam_filter:
+                        _flabel = '[B]' + _flabel + '[/B]'  # zaznacz aktywny
+                    _fitem = control.item(_flabel, offscreen=True)
+                    _fitem.setProperty('title', title)
+                    _fitem.setInfo('Video', {'count': _fcount})
+                    _furl = _base_trash_url + (f'&cam_filter={_fval}' if _fval else '')
+                    control.addItem(syshandle, _furl, _fitem, isFolder=True)
+
+                # ZMIANA (2026-04) [FEATURE]: podfolder "Niezweryfikowane tytułem" w folderze
+                # odrzucone — pokazywany tylko gdy są takie źródła I nie jesteśmy już w środku.
+                # POWOD: gdy użytkownik wpisał zakazany host i wszystkie linki były z tego hosta,
+                #        linki odrzucone tylko przez weryfikację tytułu nie miały gdzie trafić.
+                #        Podfolder daje do nich dostęp bez mieszania ich z listą odrzuconych.
+                # NIE ZMIENIAC: warunek not _is_unverified_subfolder — zapobiega rekurencji
+                #               (podfolder nie pokazuje się gdy już jesteśmy w jego wnętrzu);
+                #               count=1996 — poniżej istniejących filtrów (1997-1999), żeby
+                #               podfolder pojawiał się jako ostatni w sekcji nawigacyjnej.
+                #               Url zawiera unverified_title=1 — unikalny parametr odczytywany
+                #               w bloku if trash: na początku showItems.
+                try:
+                    if not _is_unverified_subfolder:
+                        _uv_check_raw = control.window.getProperty('FanVodPL.title_unverified_json')
+                        _uv_check = json.loads(_uv_check_raw) if _uv_check_raw else []
+                        if _uv_check:
+                            _uv_count = len(_uv_check)
+                            _uv_label = f'[COLOR yellow][I]Niezweryfikowane tytułem ({_uv_count})[/I][/COLOR]'
+                            _uv_item = control.item(_uv_label, offscreen=True)
+                            _uv_item.setProperty('title', title)
+                            _uv_item.setInfo('Video', {'count': 1996})
+                            _uv_url = _base_trash_url + '&unverified_title=1'
+                            control.addItem(syshandle, _uv_url, _uv_item, isFolder=True)
+                            fflog(f'[TRASH] dodano podfolder niezweryfikowane tytułem ({_uv_count})', 1)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
         control.addItems(syshandle, list_of_items)  # dodanie zbiorcze
 
         # if control.setting("auto.select.next.item.to.play") == "true":
@@ -4099,6 +5406,7 @@ class sources:
         # self.test = {'Nazwa': title, 'Rok': year, 'Sezon': season, 'Odcinek': episode}
 
         progressDialog = None
+        preview_mode = kwargs.get("preview_mode") or "play"
 
         s = json.loads(source)[0]  # bo zostało przyszykowane w liście
 
@@ -4119,6 +5427,9 @@ class sources:
                 from ptw.libraries.player import player
                 control.window.clearProperty("FanVodPL.forceCatalogThisSession")
                 try:
+                    if preview_mode == "preview":
+                        if _ff_run_preview_5min(s["url"], title=title, meta=meta):
+                            return True
                     fflog('[AUTO JAKOŚĆ] starting player.run', 1)# === FFGPT5: disable resolve-first to allow player().run (watched/history fix) ===
 # [FFG-PAUSE] 
 # [FFG-PAUSE]                     # FFRF: resolve-first (setResolvedUrl) for proper return to list
@@ -4133,6 +5444,7 @@ class sources:
 # [FFG-PAUSE]                     except Exception as _e:
 # [FFG-PAUSE]                         pass
 # [FFG-PAUSE] # === /FFGPT5 ===
+                    _ff_set_source_url_prop(s)
                     player().run(title, year, season, episode, imdb, tvdb, tmdb, s["url"], meta=meta, hosting=s.get("source"), customPlayer=s.get("customPlayer"))
                 except Exception as e:
                     fflog(f'[AUTO JAKOŚĆ] player.run failed: {e}', 1, 1)
@@ -4177,6 +5489,9 @@ class sources:
                 from ptw.libraries.player import player
                 control.window.clearProperty("FanVodPL.forceCatalogThisSession")
                 try:
+                    if preview_mode == "preview":
+                        if _ff_run_preview_5min(url, title=title, meta=meta):
+                            return True
                     fflog('[AUTO JAKOŚĆ] starting player.run', 1)# === FFGPT5: disable resolve-first to allow player().run (watched/history fix) ===
 # [FFG-PAUSE] 
 # [FFG-PAUSE]                     # FFRF: resolve-first (setResolvedUrl) for proper return to list
@@ -4191,6 +5506,7 @@ class sources:
 # [FFG-PAUSE]                     except Exception as _e:
 # [FFG-PAUSE]                         pass
 # [FFG-PAUSE] # === /FFGPT5 ===
+                    _ff_set_source_url_prop(s)
                     player().run(title, year, season, episode, imdb, tvdb, tmdb, url, meta=meta, hosting=s.get("source"), customPlayer=s.get("customPlayer"))
                 except Exception as e:
                     fflog(f'[AUTO JAKOŚĆ] player.run failed: {e}', 1, 1)
@@ -4224,6 +5540,9 @@ class sources:
         auto_select_next_item_to_play = control.setting("auto.select.next.item.to.play") == "true" if auto_select_next_item_to_play is None else auto_select_next_item_to_play
         # if control.setting("auto.select.next.item.to.play") != "true":
         if not auto_select_next_item_to_play:
+            preview_mode = _ff_choose_playback_mode(s, allow_preview=True)
+            if preview_mode == "cancel":
+                return
             _singleplay_playItem()
         else:
             fflog(f'auto play',1,1)
@@ -4463,6 +5782,7 @@ class sources:
 # [FFG-PAUSE]                             except Exception as _e:
 # [FFG-PAUSE]                                 pass
 # [FFG-PAUSE] # === /FFGPT5 ===
+                            _ff_set_source_url_prop(items[i])
                             player().run(title, year, season, episode, imdb, tvdb, tmdb, self.url, meta=meta, hosting=items[i].get("source"), customPlayer=items[i].get("customPlayer"))
                         except Exception as e:
                             fflog(f'[AUTO JAKOŚĆ] player.run failed: {e}', 1, 1)
@@ -4619,7 +5939,7 @@ class sources:
                         'Wybierz hosty' + _hs_part_info + '  |  ' + _hs_dlg_title, items)
 
                     if chosen < 0 or chosen == IDX_CANCEL:
-                        return self.sources
+                        return None  # PATCH: wyraźny sygnał anulowania — nie wpada w fallback odrzuconych
                     if chosen == IDX_SEARCH:
                         break
                     if chosen in (0, 1, IDX_FREE + 1):
@@ -4820,6 +6140,7 @@ class sources:
             if originalname:
                 aliases.append({"originalname": originalname, 'country': 'original' })
             for i in sourceDict:
+
                 threads.append(
                     threading.Thread(
                         target=self.getMovieSource,
@@ -5473,10 +6794,11 @@ class sources:
                         #pass
 
         self.blocked_sources_extend = True
+        self.content = "movie" if tvshowtitle is None else "episode"
 
         if sort is None or sort:
             # self.sources = self.sortSources(self.sources)  # jakbym chciał, aby najpierw była biblioteka a potem pobrane
-            self.sourcesFilter(year=year, premiered=premiered, duration=duration, episode=episode, tvshowtitle=tvshowtitle)  # filtrowanie wg różnych kryteriów
+            self.sourcesFilter(year=year, premiered=premiered, duration=duration, episode=episode, tvshowtitle=tvshowtitle, title=title, localtitle=localtitle, localtvshowtitle=localtvshowtitle, originalname=originalname)  # filtrowanie wg różnych kryteriów
 
         if line2:
             control.sleep(1000-800)
@@ -5504,6 +6826,7 @@ class sources:
 
     def prepareSources(self):
         control.window.setProperty(self.itemRejected, json.dumps([]))
+        fflog('[prepareSources] RESET itemRejected do []')
         try:
             control.makeFile(control.dataPath)
 
@@ -6091,6 +7414,7 @@ class sources:
                 pass
 
             if "customTitles" in q and q["customTitles"]:
+
                 if (p := q.get('tvshowtitle')) and p != "None":
                     # seriale
                     if (s := xbmcgui.Dialog().input("Główny tytuł serialu [CR][LIGHT](anglojęzyczny lub oryginalny)[/LIGHT]", p)):
@@ -6303,9 +7627,11 @@ class sources:
                         # provider_order[(control.setting(d["provider"].split(" ")[0]+".sort.order") if control.setting(d["provider"].split(" ")[0]+".sort.order") and control.setting(d["provider"].split(" ")[0]+".sort.order") != "0" else d["provider"] if any(d["provider"].startswith(p) for p in my_provider_order) else "")],  # eksperyment
                         language_order.get(d["language"]),
                         quality_order.get(d["quality"]),
-                        d["provider"].replace("filman_api", "filma"),  # dostawca (serwis internetowy www) (dla filmana: aby filman_api było przed zwykłym filman)
                         source_utils.convert_size_to_bytes( d["size"] if "size" in d  else  d["info"].rsplit('|')[-1] if "info" in d and d["info"]  else '')*-1,
+                        d["provider"].replace("filman_api", "filma"),  # dostawca (serwis internetowy www) (dla filmana: aby filman_api było przed zwykłym filman)
                         _ff_part_rank(d),
+                        # HOST SPEED: szybsze hosty wyzej (0=szybki, 1=nieznany, 2=wolny)
+                        _ff_host_speed_rank(d),
                     ),
                 )
             except Exception:
@@ -6329,9 +7655,11 @@ class sources:
                         provider_order[(control.setting(d["provider"].split(" ")[0]+".sort.order") if control.setting(d["provider"].split(" ")[0]+".sort.order") and control.setting(d["provider"].split(" ")[0]+".sort.order") != "0" else d["provider"] if d["provider"] in my_provider_order else "")],
                         language_order.get(d["language"]),
                         quality_order.get(d["quality"]),
+                        source_utils.convert_size_to_bytes( d["size"] if "size" in d  else  d["info"].rsplit('|')[-1] if "info" in d and d["info"]  else '')*-1,
                         d["provider"].replace("filman_api", "filma"),  # dostawca (serwis internetowy www) (dla filmana: aby filman_api było przed zwykłym filman)
                         d["source"],  # source (serwer, hosting)
-                        source_utils.convert_size_to_bytes( d["size"] if "size" in d  else  d["info"].rsplit('|')[-1] if "info" in d and d["info"]  else '')*-1,
+                        # HOST SPEED: szybsze hosty wyzej
+                        _ff_host_speed_rank(d),
                     ),
                 )
             except Exception:
@@ -6407,26 +7735,196 @@ class sources:
                 fflog(f'sources={json.dumps(sources, indent=2)}', 0)
                 pass
 
+        # AI HOOK — Sprint 1 z planu wdrożenia AI v1.
+        # Tryb OFF (ai.enable=false) -> no-op, sources zwrócone bez zmian.
+        # Tryb LOG_ONLY -> tylko log top-5 kandydatów, ZERO zmian w kolejności.
+        # Tryb SOFT -> placeholder na etap 4 (bonus/malus). Na razie no-op bo brak modelu.
+        #
+        # ZASADA NADRZĘDNA (plan rozdz. 3):
+        # AI widzi WYŁĄCZNIE linki, które PRZESZŁY sourcesFilter (twarde filtry, czarna lista,
+        # zakazane frazy). Tu w sortSources sources są już po wszystkich filtrach.
+        try:
+            sources = self._ai_rerank_sources(sources)
+        except Exception:
+            try:
+                from ptw.libraries.ai_logger import ai_log_exc as _ai_exc
+                _ai_exc(0)
+            except Exception:
+                pass
+            # AI failure nie może popsuć sortowania — zwracamy oryginał
+            pass
+
         return sources
 
 
+    def _ai_rerank_sources(self, sources):
+        """
+        Sprint 1 placeholder:
+        - LOG_ONLY: zaloguj top-5 kandydatów przez ai_logger, nie ruszaj kolejności.
+        - SOFT: (Sprint 4) dopisze bonus/malus na podstawie ai_ranker.score().
+                W Sprincie 1 bez modelu - zwraca sources bez zmian.
+        - OFF: zwraca sources bez zmian.
+
+        UWAGA: nic nie zapisuje do ai_link_history z sortSources (to za dużo rekordów
+        na raz - cała lista kandydatów). Zapis historii odbywa się dopiero w player.run()
+        dla linku FAKTYCZNIE wybranego do odtwarzania.
+        """
+        if not sources:
+            return sources
+        try:
+            from ptw.libraries import control as _ai_ctrl
+            if not _ai_ctrl.ai_enabled():
+                return sources
+            _mode = _ai_ctrl.ai_mode()
+            if _mode == _ai_ctrl.AI_MODE_OFF:
+                return sources
+
+            from ptw.libraries.ai_logger import ai_log, ai_log_verbose
+
+            if _mode == _ai_ctrl.AI_MODE_LOG_ONLY:
+                # Tylko log top-5, bez zmian kolejności
+                _top = sources[:5]
+                ai_log('sortSources: LOG_ONLY, kandydatow={} (top5 nizej)'.format(len(sources)))
+                for _i, _s in enumerate(_top):
+                    ai_log_verbose(
+                        '  #{}. provider={} source={} q={} lang={} size={}'.format(
+                            _i + 1,
+                            _s.get('provider', '?'),
+                            _s.get('source', '?'),
+                            _s.get('quality', '?'),
+                            _s.get('language', '?'),
+                            _s.get('size', _s.get('info', '?')),
+                        )
+                    )
+                return sources
+
+            if _mode == _ai_ctrl.AI_MODE_SOFT:
+                # Sprint 4: tu podpiety bedzie ai_ranker.score() z ai_features.extract().
+                # Teraz (Sprint 1) brak modelu - tryb SOFT jest bezpieczny no-op.
+                ai_log('sortSources: SOFT mode aktywny ale model nie wytrenowany - no-op ({} src)'.format(len(sources)))
+                return sources
+
+            return sources
+        except Exception:
+            try:
+                from ptw.libraries.ai_logger import ai_log_exc
+                ai_log_exc(0)
+            except Exception:
+                pass
+            return sources
+
+
     def sourcesFilter(self, **kwargs):
-        fflog('Filtrowanie')
+        fflog(f'Filtrowanie (wejście: {len(self.sources)} źródeł)')
         # fflog(f'{kwargs=}')
 
         _release_year = _ff_extract_release_year(kwargs.get("year"), kwargs.get("premiered"))
         _allow_legacy_avi = _ff_is_legacy_decades(_release_year)
         _is_episode = bool(kwargs.get("episode")) and bool(kwargs.get("tvshowtitle"))
         _bypass_for_classic_series = _ff_is_classic_series(_release_year, _is_episode)
+        _skip_foreign_audio_guard = _ff_should_skip_foreign_audio_guard(_release_year, _is_episode)
+
+        # Wyjątek tytułu — pomiń filtr zwykłych zakazanych słów dla tytułów z whitelisty.
+        # Priorytetowe zakazane (!word) dalej działają.
+        _bypass_disallowed_for_title = False
+        try:
+            _cand_titles = [
+                (kwargs.get("title") or "").lower().strip(),
+                (kwargs.get("tvshowtitle") or "").lower().strip(),
+                (kwargs.get("localtitle") or "").lower().strip(),
+                (kwargs.get("localtvshowtitle") or "").lower().strip(),
+                (kwargs.get("originalname") or "").lower().strip(),
+            ]
+            for _ct in _cand_titles:
+                if _ct and _ct in _FF_TITLE_WHITELIST_DISALLOWED:
+                    _bypass_disallowed_for_title = True
+                    fflog(f'[TITLE_WHITELIST] Tytuł "{_ct}" na whiteliście — pełny bypass filtrów (zakazane słowa, lang_tag_floor, size_limits, SD)', 1)
+                    break
+        except Exception:
+            pass
+
+        # WHITELIST TYTUŁÓW: wymuś te same bypassy co dla klasyków (1950-2015).
+        # Dzięki temu Flow omija: lang_tag_floor, size_limits, hard_blockers, SD reject, URL_AUDIO_CACHE.
+        # Używamy istniejących flag _ff_bypass_classic_series i _ff_skip_foreign_audio_guard —
+        # zmiana 0 wierszy w 9 miejscach użycia, bo flagi już tam są sprawdzane.
+        if _bypass_disallowed_for_title:
+            _bypass_for_classic_series = True
+            _skip_foreign_audio_guard = True
+
         try:
             self._ff_release_year = _release_year
             self._ff_allow_legacy_avi = _allow_legacy_avi
             self._ff_bypass_classic_series = _bypass_for_classic_series
+            self._ff_skip_foreign_audio_guard = _skip_foreign_audio_guard
         except Exception:
             pass
 
         # odrzucenie tych, które się nie mają adresu URL (może w wyniku jakiegoś błędu w scraperze)
         self.sources = [i for i in self.sources if i.get("url")]
+
+        # ZMIANA (2026-04) [FEATURE]: zachowaj kopię źródeł sprzed filtru tytułu,
+        # żeby po wszystkich filtrach można było zbudować listę "niezweryfikowane tytułem".
+        # POWOD: użytkownik może chcieć ręcznie przejrzeć linki odrzucone tylko przez tytuł
+        #        (np. plik ma inną nazwę serialu niż szukany).
+        # NIE ZMIENIAC: zapis musi być tu — po usunięciu pustych URL, przed filtrem tytułu.
+        #               _title_rejected_raw wypełniany jest wewnątrz bloku tytułowego poniżej.
+        _pre_title_saved = list(self.sources)
+        _title_rejected_raw = []
+
+        # --- WERYFIKACJA TYTUŁU (podwójne sprawdzenie) ---
+        # Odrzuca linki których nazwa pliku/label zawiera nazwę INNEGO serialu/filmu.
+        # Chroni przed fałszywymi trafieniami np. "Psych" dla zapytania "Smoke".
+        try:
+            _ff_tv = kwargs.get("tvshowtitle") or ""
+            _ff_title = kwargs.get("title") or ""
+            _ff_local = kwargs.get("localtvshowtitle") or kwargs.get("localtitle") or ""
+            _ff_orig  = kwargs.get("originalname") or ""
+
+            def _ff_title_tokens(*args):
+                """Buduje zbiór tokenów tytułu (słowa >= 3 znaki, bez stopwords)."""
+                _stop = {'the','and','of','in','a','an','to','for','is','on','at','by','or','as'}
+                tokens = set()
+                for s in args:
+                    if not s:
+                        continue
+                    for w in re.split(r'[\s\.\-_+/\\]+', str(s).lower()):
+                        w = re.sub(r'[^a-z0-9ąćęłńóśźż]', '', w)
+                        if len(w) >= 3 and w not in _stop:
+                            tokens.add(w)
+                return tokens
+
+            _ff_tokens = _ff_title_tokens(_ff_tv, _ff_title, _ff_local, _ff_orig)
+
+            # ZMIANA (2026-04) [FEATURE]: usunięto warunek kwargs.get("episode") — weryfikacja
+            # tytułu działa teraz dla seriali I filmów, żeby zbierać _title_rejected_raw dla obu.
+            # POWOD: użytkownik chce przycisku "niezweryfikowane tytułem" zarówno dla filmów jak
+            #        i seriali. Bez tej zmiany _title_rejected_raw był zawsze pusty dla filmów.
+            # NIE ZMIENIAC: warunek _ff_tokens musi pozostać — bez tokenów tytułu filtr nie ma
+            #               podstaw do działania i pomijamy blok bezpiecznie.
+            if _ff_tokens:
+                _before_title = len(self.sources)
+                def _ff_item_matches_title(item):
+                    txt = " ".join([
+                        str(item.get("label", "") or ""),
+                        str(item.get("info",  "") or ""),
+                        str(item.get("url",   "") or "").split("?")[0].split("/")[-1][:300],
+                    ]).lower()
+                    # Przepuść jeśli przynajmniej jeden token tytułu jest w tekście jako osobne słowo
+                    for tok in _ff_tokens:
+                        if re.search(r'(?<![a-z0-9])' + re.escape(tok) + r'(?![a-z0-9])', txt):
+                            return True
+                    return False
+                self.sources = [i for i in self.sources if _ff_item_matches_title(i)]
+                # ZMIANA (2026-04) [FEATURE]: zbierz źródła odrzucone przez weryfikację tytułu.
+                # POWOD: potrzebne do zbudowania listy "niezweryfikowane tytułem" w dialogu wyboru.
+                # NIE ZMIENIAC: obliczać tu — _ff_item_matches_title jest dostępna tylko w tym bloku.
+                _title_rejected_raw = [i for i in _pre_title_saved if not _ff_item_matches_title(i)]
+                _after_title = len(self.sources)
+                if _before_title != _after_title:
+                    fflog(f'[sourcesFilter] weryfikacja tytułu: odrzucono {_before_title - _after_title} źródeł (tokeny: {_ff_tokens})', 1, 1)
+        except Exception as _e:
+            fflog(f'[sourcesFilter] weryfikacja tytułu BŁĄD: {_e}', 1, 1)
+        # --- END WERYFIKACJA TYTUŁU ---
 
         # fflog(f'{len(self.sources)=} self.sources={json.dumps(self.sources, indent=2)}',1,1)
         if control.setting("filter.duplicates") == "true":
@@ -6465,6 +7963,7 @@ class sources:
         # [ s.update({"language": l.lower()})  for s in self.sources  if (l := s.get("language")) ]  # zmiana kodu języka na małe litery (nie wiem, czy potrzeba)
 
         sources_before_filtered = (self.sources).copy()  # kopia
+        fflog(f'[sourcesFilter] sources_before_filtered: {len(sources_before_filtered)} elementów')
 
 
         # coś z plikami lokalnymi (biblioteka Kodi może?)
@@ -6629,6 +8128,37 @@ class sources:
         # coś z domenami, które chyba są z jakiegoś powodu wykluczone
         # RC-10c: j.w. single-pass O(n)
         self.sources = [i for i in self.sources if not (i["source"].lower() in self.hostblockDict and "debrid" not in i)]
+
+        # --- Filtr rozmiaru pliku (tylko filmy) ---
+        # BYPASS: whitelist tytułów (_bypass_disallowed_for_title) oraz klasyki (1950-2005/2015) —
+        # te tytuły mogą mieć niestandardowe rozmiary plików (np. animacje, stare filmy).
+        _gb_bypass = _bypass_disallowed_for_title or _bypass_for_classic_series or _allow_legacy_avi
+        if getattr(self, "content", None) == "movie" and not _gb_bypass:
+            def _gb_pass(item):
+                raw = item.get("size") or (item.get("info", "").rsplit("|", 1)[-1] if item.get("info") else "")
+                size_bytes = source_utils.convert_size_to_bytes(raw)
+                if not size_bytes:
+                    return True  # brak info o rozmiarze - przepuszczamy
+                size_gb = size_bytes / (1024 ** 3)
+                q        = item.get("quality", "")
+                lng      = item.get("language", "").lower()
+                is_multi = "mul" in lng or "multi" in lng
+                is_4k    = q in ("4K", "1440p")
+                is_fhd   = q in ("1080p", "1080i")
+                is_hd    = q == "720p"   # HD już znormalizowane do 720p wyżej
+                if is_4k  and is_multi:  return 14 <= size_gb <= 25  # Multi 4K
+                if is_4k:                return 12 <= size_gb <= 25  # 4K
+                if is_fhd and is_multi:  return  8 <= size_gb <= 18  # Multi FullHD
+                if is_fhd:               return  6 <= size_gb <= 18  # FullHD
+                if is_hd  and is_multi:  return  4 <= size_gb <= 12  # Multi HD
+                if is_hd:                return  3 <= size_gb <= 10  # HD
+                return True  # SD, CAM, SCR - bez limitu
+            _before = len(self.sources)
+            self.sources = [i for i in self.sources if _gb_pass(i)]
+            fflog(f'[filtr GB filmów] przed={_before} po={len(self.sources)}')
+        elif getattr(self, "content", None) == "movie" and _gb_bypass:
+            fflog(f'[filtr GB filmów] BYPASS aktywny (whitelist_title={_bypass_disallowed_for_title}, classic_series={_bypass_for_classic_series}, legacy_avi={_allow_legacy_avi}) — {len(self.sources)} źródeł bez filtra GB')
+        # --- koniec filtru GB ---
 
         # chyba angielskie źródła na koniec listy
         # RC-10d: 3 przejścia (O(n)+O(n²)+O(n)) → 1 przejście O(n) z set
@@ -6837,7 +8367,8 @@ class sources:
                 if numbering:
                     #label = "[LIGHT]%02d[/LIGHT] | [LIGHT][B]%s[/B][/LIGHT] | " % (int(i + 1 + offset), p)
                     if source.get("on_account"):
-                        label = "[LIGHT]{}[/LIGHT] |[COLOR gold]%s[/COLOR]| " % (p)
+                        # PATCH 2026-04-25: link z konta ma zielony znacznik providera.
+                        label = "[LIGHT]{}[/LIGHT] |[COLOR springgreen]%s[/COLOR]| " % (p)
                     else:
                         label = "[LIGHT]{}[/LIGHT] |%s| " % (p)
                 else:
@@ -6854,14 +8385,15 @@ class sources:
 
             # oznaczenie języka
             if lng:
+                _lng_display = "PL+EN" if ("mul" in lng or "multi" in lng) else lng
                 if (
                     multi and lng != "en"  # nie rozumiem, kiedy ten warunek zachodzi
                     or not multi and lng != "en"  # dałem ten warunek
                    ):
                     if extrainfo:
-                        label += "[B]%s[/B] | " % lng
+                        label += "[B]%s[/B] | " % _lng_display
                     else:
-                        f = ("[B]%s[/B] | " % lng) + f  # inny wariant
+                        f = ("[B]%s[/B] | " % _lng_display) + f  # inny wariant
                 r"""
                 else:
                     if "mul" in lng or re.search(r"\bMULTI\b", t, re.I):
@@ -6916,6 +8448,7 @@ class sources:
             label = re.sub(r"\|\s+\|", "|", label)
             label = re.sub(r"\|\s+\|", "|", label)  # w pewnych okolicznościach ponowne wykonanie takiej samej linijki kodu jak wyżej pomaga
             label = re.sub(r"\|(?:\s+|)$", "", label)
+            label = re.sub(r"\bMULTI(?:\s*PL)?\b", "PL+EN", label, flags=re.I)  # zamiana MULTI / MULTI PL na PL+EN
             label = re.sub(r"\[I\](\d+(?:[.,]\d+)?\s*[GMK]B) ?\[/I\]", r"[B]\1[/B]", label, flags=re.I)  # wyróżnienie rozmiaru pliku
             label = re.sub(r"(?<=\d)\s+(?=[GMK]B\b)", "\u00A0", label, flags=re.I)  # aby nie rodzielal cyfr od jednostek
             label = re.sub("((?:1080|720|1440)[pi])", r"[LOWERCASE]\1[/LOWERCASE]", label, flags=re.I)  # aby np. 1080i było bardziej widoczne
@@ -6930,6 +8463,7 @@ class sources:
                 # label = label.replace(" | ", "|")  # zmniejszenie odstępów
                 label = label.replace(" |", "|").replace("| ", "|")  # zmniejszenie odstępów
             """
+
             if remove_verticals_on_list:
                 label = label.replace("|", " ")
                 label = label.replace("   ", "  ")
@@ -6970,7 +8504,10 @@ class sources:
                 _clib_raw, _cp_raw = _cfg_color_cache[_pkey]
                 clib = _clib_raw
                 clib = int(clib) if clib else 10
-                if clib < 10 and source.get("on_account"):
+                # PATCH 2026-04-25: pozycje już dostępne na koncie mają stały zielony kolor.
+                if source.get("on_account"):
+                    source["label"] = f'[COLOR springgreen]{label}[/COLOR]'  # wdrożenie LABELa
+                elif clib < 10:
                     color = source_utils.getPremColor(str(clib))
                     source["label"] = f'[COLOR {color}]{label}[/COLOR]'  # wdrożenie LABELa
                 else:
@@ -7204,7 +8741,11 @@ class sources:
                         #i["label"] = re.sub(r"(\|.*?\|)|$", r"\1 [COLOR darkred]brak PL[/COLOR] |", i["label"], 1).rstrip(" |")
                         i["label"] = re.sub(r"(\|.*?\|)|(\] )(\s{3,}\[CR\])|$", r"\1\2 [COLOR darkred]brak PL[/COLOR]\3 |", i["label"], 1).replace("[CR] |","[CR]").rstrip(" |")
                         i["label"] = re.sub(r" {4,9}", "", i["label"], 1)
-                        self.sources.remove(i)
+                        # ZMIANA (2026-04) [PATCH]: usuwaj zrodlo bez PL tylko dla premium providerow
+                        # POWOD: ustawienie onlyPL blokowalo takze zwykle scrapery - chcemy blokowac tylko nopremium/rapideo/twojlimit/xt7/tb7
+                        # NIE ZMIENIAC: label 'brak PL' zostawiamy dla wszystkich (info wizualne); usuwanie tylko dla premium
+                        if self._is_premium_provider(i):
+                            self.sources.remove(i)
             """
             self.sources = [
                 i
@@ -7314,7 +8855,12 @@ class sources:
             if zwykla:
                 label = src.get('label', '')
                 url = src.get('url', '')
-                w = label + ' ' + url
+                # ZMIANA (2026-04) [PATCH]: sprawdzaj także src['source'] przy filtrze fraz.
+                # POWOD: użytkownik wpisuje w GUI „Unikaj fraz” nazwy hostów (np. twojplik),
+                #        a host bywa zapisany tylko w polu source, nie w label ani URL.
+                # NIE ZMIENIAC: bez tego ręczna blokada hosta z GUI nie zapisze się do odrzuconych.
+                source = src.get('source', '')
+                w = label + ' ' + url + ' ' + source
                 for pattern in zwykla:
                     if pattern.search(w):
                         if color:
@@ -7341,8 +8887,62 @@ class sources:
         prio_rx, prio2_rx, prio1_rx = make_patterns(priorytetowa)
         nr_rx, nr2_rx, nr1_rx = make_patterns(nonrejectable_phrases)
 
+        # ZMIANA (2026-04) [PATCH]: osobny detektor tylko dla fraz wpisanych
+        # w ustawieniach GUI „Unikaj fraz”, bez stałej listy _FF_DEFAULT_BLOCK.
+        # POWOD: folder „Odrzucone przez Unikaj fraz z ustawień GUI” ma pokazywać
+        #        tylko świadome wpisy użytkownika, a nie automatyczne blokady CAM/TS/MD/XVID.
+        # NIE ZMIENIAC: merged_list nadal filtruje normalnie; ten detektor służy wyłącznie
+        #               do zbudowania FanVodPL.disallowed_rejected_json.
+        try:
+            _ff_gui_zwykla, _ff_gui_prio = rozdziel_na_priorytet(gui_list)
+            _ff_gui_disallowed_rx, _ff_gui_disallowed2_rx, _ff_gui_disallowed1_rx = make_patterns(_ff_gui_zwykla)
+            _ff_gui_prio_rx, _ff_gui_prio2_rx, _ff_gui_prio1_rx = make_patterns(_ff_gui_prio)
+        except Exception:
+            _ff_gui_disallowed_rx, _ff_gui_disallowed2_rx, _ff_gui_disallowed1_rx = [], [], []
+            _ff_gui_prio_rx, _ff_gui_prio2_rx, _ff_gui_prio1_rx = [], [], []
+        _ff_disallowed_rejected_urls = set()
+
+        def _ff_is_blocked_by_gui_disallowed(src):
+            try:
+                if not gui_list:
+                    return False
+                src_chk = src
+                if _allow_legacy_avi:
+                    try:
+                        src_chk = dict(src)
+                        for _k in ("label", "url", "info", "extrainfo", "filename", "source"):
+                            if isinstance(src_chk.get(_k), str):
+                                src_chk[_k] = _ff_prepare_text_for_blocking(src_chk.get(_k), allow_legacy_avi=True)
+                    except Exception:
+                        src_chk = src
+                if sprawdz_czy_jest(src_chk, _ff_gui_prio_rx, _ff_gui_prio2_rx, _ff_gui_prio1_rx):
+                    return True
+                if sprawdz_czy_jest(src_chk, _ff_gui_disallowed_rx, _ff_gui_disallowed2_rx, _ff_gui_disallowed1_rx):
+                    if sprawdz_czy_jest(src_chk, nr_rx, nr2_rx, nr1_rx, color='green'):
+                        return False
+                    return True
+            except Exception:
+                pass
+            return False
+
+        def _ff_mark_gui_disallowed(src):
+            try:
+                if _ff_is_blocked_by_gui_disallowed(src):
+                    _u = str(src.get('url', '') or '')
+                    if _u:
+                        _ff_disallowed_rejected_urls.add(_u)
+            except Exception:
+                pass
+
         def _txt_from_src(src):
-            return f"{src.get('label','')} || {src.get('url','')}".lower()
+            # ZMIANA (2026-04) [PATCH]: dodano pole 'source' (nazwa hosta, np. TWOJPLIK*) do tekstu
+            # sprawdzanego przez filtr "Unikaj fraz". Wcześniej filtr sprawdzał tylko label i url,
+            # przez co wpisanie "twojplik" w ustawieniach nie blokowało źródeł z tego hosta.
+            # POWOD: src['source'] zawiera nazwę hosta (TWOJPLIK*, NOPREMIUM, XT7 itp.) — bez jej
+            #        uwzględnienia filtr fraz był bezużyteczny dla blokowania po nazwie hosta.
+            # NIE ZMIENIAC: kolejność pól (label, url, source); source może być pusty — .get() z ''
+            #               chroni przed KeyError; lower() musi obejmować całość.
+            return f"{src.get('label','')} || {src.get('url','')} || {src.get('source','')}".lower()
 
         def _is_blocked_by_main(src):
             # --- WHITELIST: AI + ATVP/ATPV (Apple TV) ---------------------  ### PATCH ###
@@ -7366,6 +8966,10 @@ class sources:
 
             if sprawdz_czy_jest(src_chk, prio_rx, prio2_rx, prio1_rx, color='ffcc0000'):
                 return True
+            # WHITELIST TYTUŁÓW: tytuł na liście (_FF_TITLE_WHITELIST_DISALLOWED) pomija
+            # zwykłe zakazane słowa. Priorytetowe (!word) już wyżej sprawdzone — one działają dalej.
+            if _bypass_disallowed_for_title:
+                return False
             if sprawdz_czy_jest(src_chk, disallowed_rx, disallowed2_rx, disallowed1_rx):
                 if sprawdz_czy_jest(src_chk, nr_rx, nr2_rx, nr1_rx, color='green'):
                     return False
@@ -7405,14 +9009,34 @@ class sources:
 
         _filtered = []
         if _bypass_for_classic_series:
-            # CLASSIC SERIES BYPASS (1950–2015): wszystkie frazy blokujące wyłączone
-            _filtered = list(self.sources)
+            # ZMIANA (2026-04) [PATCH]: classic_series bypass przepuszcza źródła bez filtrów
+            # jakościowych/formatowych, ale nadal respektuje jawne wykluczenia użytkownika
+            # (words.disallowed). Poprzednio _filtered = list(self.sources) kopiowało WSZYSTKO,
+            # ignorując ustawienie "Unikaj fraz" — np. wpisanie "twojplik" nie działało dla
+            # seriali klasycznych takich jak Star Trek Enterprise (2001).
+            # POWOD: bypass dotyczył filtrów jakości (SD/AVI dla starych tytułów), nie powinien
+            #        pomijać świadomych wykluczeń hosta przez użytkownika.
+            # NIE ZMIENIAC: _is_blocked_by_main() zawiera wewnętrznie _bypass_disallowed_for_title
+            #               (whitelist tytułów) — ta logika pozostaje niezmieniona. Nie przywracać
+            #               _filtered = list(self.sources) — to przywróci błąd blokowania hosta.
+            for _s in self.sources:
+                if _is_blocked_by_main(_s):
+                    _ff_mark_gui_disallowed(_s)
+                    continue
+                _filtered.append(_s)
         else:
             for _s in self.sources:
                 _txt = _txt_from_src(_s)
 
                 # Główna siatka – najpierw blokada, potem wyjątki
                 if _is_blocked_by_main(_s):
+                    _ff_mark_gui_disallowed(_s)
+                    continue
+
+                # URL AUDIO CACHE: odrzuć linki z potwierdzonymi obcymi sciezkami audio
+                # Wyjątek: stare filmy/seriale mają przechodzić bez foreign-audio blacklisting.
+                if (not _skip_foreign_audio_guard) and _ff_url_audio_is_blocked(_s):
+                    _ff_mark_gui_disallowed(_s)
                     continue
 
                 # Wyjątki
@@ -7426,6 +9050,7 @@ class sources:
                     if sprawdz_czy_jest(_s, nr_rx, nr2_rx, nr1_rx, color='green'):
                         _filtered.append(_s); continue
                     else:
+                        _ff_mark_gui_disallowed(_s)
                         continue
 
                 _filtered.append(_s)
@@ -7433,6 +9058,21 @@ class sources:
         self.sources = _filtered
 # SORTOWANIE
         self.sources = self.sortSources(self.sources)
+
+        # --- Żółte wyróżnienie najwyższej jakości ---
+        _quality_rank_top = ["4K", "1440p", "1080p", "1080i", "720p", "SD", "SCR", "CAM"]
+        _top_quality = None
+        for _q in _quality_rank_top:
+            if any(s.get("quality") == _q for s in self.sources):
+                _top_quality = _q
+                break
+        if _top_quality:
+            for _s in self.sources:
+                if _s.get("quality") == _top_quality:
+                    _lbl = _s.get("label", "")
+                    if "[COLOR gold]" not in _lbl:
+                        _s["label"] = "[COLOR gold][B]" + _lbl + "[/B][/COLOR]"
+        # --- koniec żółtego wyróżnienia ---
 
         # numerowanie
         if numbering:
@@ -7466,8 +9106,85 @@ class sources:
                 sources_thrown_out[i]["label"] = sources_thrown_out[i]["label"].replace("{}", f"{offset + i + 1:02d}", 1)
                 # fflog(f'e {i=}  {sources_thrown_out[i]=}',1,1)
 
-        # wrzucenie do pamięci RAM
+        # wrzucenie do pamięci RAM — merguj z istniejącymi (wielokrotne wywołania play przy wielu hostach)
+        try:
+            _existing_rejected = json.loads(control.window.getProperty(self.itemRejected)) or []
+        except Exception:
+            _existing_rejected = []
+        if _existing_rejected:
+            # deduplikacja po url — zachowaj unikalne wpisy z obu list
+            _seen_urls = {s.get('url') for s in sources_thrown_out if s.get('url')}
+            _to_merge = [s for s in _existing_rejected if s.get('url') not in _seen_urls]
+            sources_thrown_out = sources_thrown_out + _to_merge
         control.window.setProperty(self.itemRejected, json.dumps(sources_thrown_out))
+        fflog(f'[sourcesFilter] ZAPIS itemRejected: thrown_out={len(sources_thrown_out)}, before_filtered={len(sources_before_filtered)}, after_all_filters={len(self.sources)}')
+
+        # ZMIANA (2026-04) [PATCH]: osobna lista dla linków odrzuconych przez
+        # frazy wpisane w ustawieniach GUI „Unikaj fraz”.
+        # POWOD: scalony patch musi zachować równocześnie „Niezweryfikowane tytułem”
+        #        oraz ręczny koszyk Unikaj fraz; bez tej property modal nie ma danych.
+        # NIE ZMIENIAC: nie wpisuj tu całego itemRejected — stałe zakazane frazy z kodu
+        #               mają odpadać bez tego ręcznego folderu, chyba że użytkownik sam
+        #               wpisze taką frazę w GUI „Unikaj fraz”.
+        try:
+            _ff_disallowed_rejected = []
+            if _ff_disallowed_rejected_urls:
+                _seen_disallowed_urls = set()
+                for _s in sources_thrown_out:
+                    _u = str(_s.get('url', '') or '')
+                    if _u and _u in _ff_disallowed_rejected_urls and _u not in _seen_disallowed_urls:
+                        _seen_disallowed_urls.add(_u)
+                        _ff_disallowed_rejected.append(_s)
+            if _ff_disallowed_rejected:
+                control.window.setProperty(
+                    'FanVodPL.disallowed_rejected_json',
+                    json.dumps(_ff_disallowed_rejected, ensure_ascii=False, default=str)
+                )
+            else:
+                control.window.setProperty('FanVodPL.disallowed_rejected_json', '')
+            fflog(f'[sourcesFilter] disallowed_rejected: {len(_ff_disallowed_rejected)} źródeł zapisano', 1)
+        except Exception as _e_dr:
+            control.window.setProperty('FanVodPL.disallowed_rejected_json', '')
+            fflog(f'[sourcesFilter] disallowed_rejected BŁĄD: {_e_dr}', 1)
+
+        # ZMIANA (2026-04) [FEATURE]: zbuduj listę źródeł odrzuconych TYLKO przez weryfikację
+        # tytułu — oznaczonych labelami. Zapisuje do window property FanVodPL.title_unverified_json.
+        # POWOD: użytkownik może potrzebować ręcznie wybrać plik z inną nazwą niż tytuł serialu.
+        # ZMIANA (2026-04) [PATCH]: usunięto filtr _is_blocked_by_main z pętli budowania _title_unverified.
+        # POWOD: gdy użytkownik wpisał zakazany host (np. "twojplik") i wszystkie linki były z tego hosta,
+        #        _title_unverified stawał się pusty — źródła niezweryfikowane tytułem znikały całkowicie
+        #        z folderu odrzucone. Niezweryfikowane tytułem mają się ZAWSZE pokazywać, niezależnie
+        #        od tego czy ich host jest na liście zakazanych fraz — to jest świadomy wybór użytkownika.
+        # NIE ZMIENIAC: _makeLabel musi być zdefiniowane wcześniej w tej samej metodzie (jest — powyżej).
+        #               Nie usuwać try/except — _title_rejected_raw może być puste (filmy, nie seriale).
+        #               Nie przywracać filtru _is_blocked_by_main tu — to celowo usunięty blok.
+        try:
+            if _title_rejected_raw:
+                _title_unverified = []
+                for _s in _title_rejected_raw:
+                    if 'label' not in _s:
+                        try:
+                            _s = _makeLabel(_s)
+                        except Exception:
+                            pass
+                    _title_unverified.append(_s)
+                control.window.setProperty(
+                    'FanVodPL.title_unverified_json',
+                    json.dumps(_title_unverified, ensure_ascii=False, default=str)
+                )
+                # ZMIANA (2026-04) [FEATURE]: zapisz kontekst (serial/film) żeby dialog
+                # mógł pokazać właściwy tekst ("odcinkowi" vs "filmowi").
+                # NIE ZMIENIAC: property musi być ustawione razem z title_unverified_json.
+                control.window.setProperty(
+                    'FanVodPL.title_unverified_is_episode',
+                    '1' if _is_episode else '0'
+                )
+                fflog(f'[sourcesFilter] title_unverified: {len(_title_unverified)} źródeł zapisano', 1)
+            else:
+                control.window.setProperty('FanVodPL.title_unverified_json', '')
+        except Exception as _e_tu:
+            control.window.setProperty('FanVodPL.title_unverified_json', '')
+            fflog(f'[sourcesFilter] title_unverified BŁĄD: {_e_tu}', 1)
 
 
         # w tb7/xt7 dodaje * jak nie wiadomo jaki serwer konkretnie (dotyczy plików z bilbioteki)
@@ -7799,23 +9516,44 @@ class sources:
 
     def sourcesDialog(self, items, trash=None, ret_item=False, preselect=-1, auto_select_next_item_to_play=None):
         try:
-            labels = [i["label"] for i in items]
+            labels = [_ff_visual_dialog_label(i, idx=n, top_n=3) for n, i in enumerate(items)]
 
             rejected_items = []
             if SHOW_REJECTED_GUI and (not trash):
                 rejected_items = json.loads(control.window.getProperty(self.itemRejected)) or []
                 if rejected_items:
-                    labels += ["[COLOR darkorange][I] *   Źródła odrzucone (przez filtry)  --->[/I][/COLOR]"]
+                    labels += ["[COLOR darkorange][B]ODRZUCONE[/B][/COLOR]  [COLOR white]— pokaż źródła ukryte przez filtry[/COLOR]"]
+
+            # --- Legenda na górze listy ---
+            _legend_rows = []
+            _legend_payloads = []
+            if not trash:
+                try:
+                    _legend_rows = _ff_build_link_legend_rows(items)
+                except Exception:
+                    _legend_rows = []
+                if _legend_rows:
+                    _legend_payloads = [None] * len(_legend_rows)
+                    _legend_rows += ["[COLOR dimgray]────────────────────────[/COLOR]"]
+                    _legend_payloads += [None]
+            # --- koniec legendy ---
+
+            _all_labels = _legend_rows + labels
+            _legend_count = len(_legend_rows)
+            _dialog_title = 'wybierz źródło' if not trash else 'źródła odrzucone'
 
             control.sleep0(100)
             fflog('open select dialog')
-            selected = control.selectDialog(labels, 'wybierz źródło', preselect=preselect)
-            # selected = control.dialog.select('wybierz źródło', labels, preselect=preselect)
-            fflog(f'{selected=} (number of position from list)')
-
-            if selected == -1:
-                fflog('anulowanie')
-                return "close://"
+            while True:
+                selected = control.selectDialog(_all_labels, _dialog_title, preselect=preselect if preselect < 0 else preselect + _legend_count)
+                fflog(f'{selected=} (number of position from list)')
+                if selected == -1:
+                    fflog('anulowanie')
+                    return "close://"
+                if selected < _legend_count:
+                    continue  # kliknięto legendę/separator - ignoruj
+                selected -= _legend_count  # korekta indeksu
+                break
 
             if SHOW_REJECTED_GUI and (not trash) and rejected_items:
                 if selected == len(labels)-1:
@@ -7890,6 +9628,7 @@ class sources:
                                 return progressDialog.close()
                         except Exception:
                             pass
+
 
                         k = control.condVisibility("Window.IsActive(virtualkeyboard)")
                         if k:
@@ -8315,3 +10054,4 @@ class sources:
         if r.count("rus"):
             return "rus"
         return any(r)
+
